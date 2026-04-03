@@ -5,7 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog"
 import { useAssetStore } from "@/store/useAssetStore"
 
 export function LeftSidebar() {
-  const { setAssets, workspaces, activeWorkspaceId, setActiveWorkspace } = useAssetStore()
+  const { assets, setAssets, workspaces, activeWorkspaceId, setActiveWorkspace } = useAssetStore()
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
