@@ -4,9 +4,10 @@ import { invoke } from "@tauri-apps/api/core"
 import { useAssetStore } from "@/store/useAssetStore"
 
 export function RightSidebar() {
-  const { selectedAsset, workspaces, updateAssetProperty } = useAssetStore()
+  const { selectedAsset, workspaces, updateAssetProperty, setSimilarAssetIds } = useAssetStore()
   const [descInput, setDescInput] = useState("")
   const [tagInput, setTagInput] = useState("")
+  const [isSearchingSimilar, setIsSearchingSimilar] = useState(false)
   
   useEffect(() => {
     if (selectedAsset) {
@@ -24,15 +25,24 @@ export function RightSidebar() {
     )
   }
 
+  const safeInvoke = async (command: string, args?: any) => {
+    if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
+      return await invoke(command, args)
+    } else {
+      console.warn(`Tauri environment not detected. Skipped command: ${command}`, args)
+    }
+  }
+
   const handleUpdateDesc = async () => {
     if (descInput === selectedAsset.description) return
     updateAssetProperty(selectedAsset.id, { description: descInput })
     try {
-      await invoke("update_asset", {
+      await safeInvoke("update_asset", {
         id: selectedAsset.id,
         tags: selectedAsset.tags || null,
         description: descInput,
-        rating: selectedAsset.rating || null
+        rating: selectedAsset.rating || null,
+        workspace_ids: selectedAsset.workspace_ids || null
       })
     } catch (err) {
       console.error("Failed to update description:", err)
@@ -43,31 +53,43 @@ export function RightSidebar() {
     const newRating = selectedAsset.rating === rating ? 0 : rating
     updateAssetProperty(selectedAsset.id, { rating: newRating })
     try {
-      await invoke("update_asset", {
+      await safeInvoke("update_asset", {
         id: selectedAsset.id,
         tags: selectedAsset.tags || null,
         description: selectedAsset.description || null,
-        rating: newRating || null
+        rating: newRating || null,
+        workspace_ids: selectedAsset.workspace_ids || null
       })
     } catch (err) {
       console.error("Failed to update rating:", err)
     }
   }
 
+  const getSafeArray = (jsonStr: any) => {
+    if (!jsonStr) return []
+    try {
+      const parsed = JSON.parse(jsonStr)
+      return Array.isArray(parsed) ? parsed : []
+    } catch (e) {
+      return Array.isArray(jsonStr) ? jsonStr : []
+    }
+  }
+
   const handleAddTag = async (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && tagInput.trim()) {
-      const currentTags = selectedAsset.tags ? JSON.parse(selectedAsset.tags) : []
+      const currentTags = getSafeArray(selectedAsset.tags)
       if (!currentTags.includes(tagInput.trim())) {
         const newTags = [...currentTags, tagInput.trim()]
         const newTagsStr = JSON.stringify(newTags)
         updateAssetProperty(selectedAsset.id, { tags: newTagsStr })
         setTagInput("")
         try {
-          await invoke("update_asset", {
+          await safeInvoke("update_asset", {
             id: selectedAsset.id,
             tags: newTagsStr,
             description: selectedAsset.description || null,
-            rating: selectedAsset.rating || null
+            rating: selectedAsset.rating || null,
+            workspace_ids: selectedAsset.workspace_ids || null
           })
         } catch (err) {
           console.error("Failed to update tags:", err)
@@ -77,19 +99,64 @@ export function RightSidebar() {
   }
 
   const handleRemoveTag = async (tagToRemove: string) => {
-    const currentTags = selectedAsset.tags ? JSON.parse(selectedAsset.tags) : []
+    const currentTags = getSafeArray(selectedAsset.tags)
     const newTags = currentTags.filter((t: string) => t !== tagToRemove)
     const newTagsStr = newTags.length > 0 ? JSON.stringify(newTags) : null
     updateAssetProperty(selectedAsset.id, { tags: newTagsStr || undefined })
     try {
-      await invoke("update_asset", {
+      await safeInvoke("update_asset", {
         id: selectedAsset.id,
         tags: newTagsStr,
         description: selectedAsset.description || null,
-        rating: selectedAsset.rating || null
+        rating: selectedAsset.rating || null,
+        workspace_ids: selectedAsset.workspace_ids || null
       })
     } catch (error) {
       console.error("Failed to update tags:", error)
+    }
+  }
+
+  const handleToggleWorkspace = async (workspaceId: string) => {
+    const currentWsIds = getSafeArray(selectedAsset.workspace_ids)
+    let newWsIds: string[]
+    
+    if (currentWsIds.includes(workspaceId)) {
+      newWsIds = currentWsIds.filter((id: string) => id !== workspaceId)
+    } else {
+      newWsIds = [...currentWsIds, workspaceId]
+    }
+    
+    const newWsIdsStr = newWsIds.length > 0 ? JSON.stringify(newWsIds) : null
+    updateAssetProperty(selectedAsset.id, { workspace_ids: newWsIdsStr as any })
+    
+    try {
+      await safeInvoke("update_asset", {
+        id: selectedAsset.id,
+        tags: selectedAsset.tags || null,
+        description: selectedAsset.description || null,
+        rating: selectedAsset.rating || null,
+        workspace_ids: newWsIdsStr
+      })
+    } catch (err) {
+      console.error("Failed to update workspaces:", err)
+    }
+  }
+
+  const handleSearchSimilar = async () => {
+    setIsSearchingSimilar(true)
+    try {
+      const similarIds = await safeInvoke("find_similar_images", {
+        targetId: selectedAsset.id,
+        threshold: 15 // Adjust perceptual hash distance threshold (0-64)
+      })
+      if (Array.isArray(similarIds)) {
+        // Include the target asset itself in the results
+        setSimilarAssetIds([selectedAsset.id, ...similarIds])
+      }
+    } catch (err) {
+      console.error("Failed to search similar images:", err)
+    } finally {
+      setIsSearchingSimilar(false)
     }
   }
 
@@ -123,11 +190,34 @@ export function RightSidebar() {
                 </div>
               </div>
 
+              {/* Workspaces */}
+              <div>
+                <p className="text-xs text-zinc-500 mb-1.5">分配工作区</p>
+                <div className="flex flex-wrap gap-2">
+                  {workspaces.map(ws => {
+                    const isAssigned = getSafeArray(selectedAsset.workspace_ids).includes(ws.id)
+                    return (
+                      <button
+                        key={ws.id}
+                        onClick={() => handleToggleWorkspace(ws.id)}
+                        className={`px-2 py-1 text-xs rounded-md border transition-colors ${
+                          isAssigned 
+                            ? 'bg-indigo-50 dark:bg-indigo-500/10 border-indigo-200 dark:border-indigo-500/20 text-indigo-600 dark:text-indigo-400' 
+                            : 'bg-transparent border-zinc-200 dark:border-zinc-800 text-zinc-500 hover:border-zinc-300 dark:hover:border-zinc-700'
+                        }`}
+                      >
+                        {ws.name}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
               {/* Tags */}
               <div>
                 <p className="text-xs text-zinc-500 mb-1.5">标签</p>
                 <div className="flex flex-wrap gap-2 mb-2">
-                  {selectedAsset.tags && JSON.parse(selectedAsset.tags).map((tag: string) => (
+                  {getSafeArray(selectedAsset.tags).map((tag: string) => (
                     <span key={tag} className="inline-flex items-center gap-1 px-2 py-1 bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 text-xs rounded-md">
                       {tag}
                       <button onClick={() => handleRemoveTag(tag)} className="hover:text-red-500 transition-colors">
@@ -160,6 +250,20 @@ export function RightSidebar() {
                   className="w-full min-h-[60px] p-2 bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-md text-[13px] text-zinc-700 dark:text-zinc-300 focus:outline-none focus:border-indigo-500 transition-colors resize-y"
                 />
               </div>
+
+              {/* Tools */}
+              {selectedAsset.asset_type === 'image' && (
+                <div>
+                  <p className="text-xs text-zinc-500 mb-1.5">智能工具</p>
+                  <button 
+                    onClick={handleSearchSimilar}
+                    disabled={isSearchingSimilar}
+                    className="w-full py-1.5 px-3 bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 text-[13px] rounded-md transition-colors flex items-center justify-center gap-2"
+                  >
+                    {isSearchingSimilar ? "正在检索相似图..." : "查找相似图 (查重)"}
+                  </button>
+                </div>
+              )}
 
               {/* Source URL */}
               <div>
