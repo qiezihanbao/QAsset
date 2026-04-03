@@ -1,17 +1,27 @@
-import { useEffect } from "react"
+import { useEffect, useCallback } from "react"
 import { motion, AnimatePresence } from "framer-motion"
-import { X, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Maximize, RotateCw } from "lucide-react"
+import { X, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Maximize } from "lucide-react"
+import { convertFileSrc } from "@tauri-apps/api/core"
 import { useAssetStore } from "@/store/useAssetStore"
 
 export function Lightbox() {
-  const { previewAsset, setPreviewAsset, assets } = useAssetStore()
+  const { previewAsset, setPreviewAsset, isFullscreenPreview, setFullscreenPreview, assets } = useAssetStore()
+
+  const navigate = useCallback((direction: number) => {
+    if (!previewAsset) return
+    const currentIndex = assets.findIndex(a => a.id === previewAsset.id)
+    let newIndex = currentIndex + direction
+    if (newIndex >= assets.length) newIndex = 0
+    if (newIndex < 0) newIndex = assets.length - 1
+    setPreviewAsset(assets[newIndex], true)
+  }, [previewAsset, assets, setPreviewAsset])
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (!previewAsset) return
+      if (!previewAsset || !isFullscreenPreview) return
       
       if (e.key === "Escape") {
-        setPreviewAsset(null)
+        setFullscreenPreview(false)
       } else if (e.key === "ArrowRight") {
         navigate(1)
       } else if (e.key === "ArrowLeft") {
@@ -21,18 +31,11 @@ export function Lightbox() {
 
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [previewAsset, assets])
+  }, [previewAsset, isFullscreenPreview, setFullscreenPreview, navigate])
 
-  if (!previewAsset) return null
+  if (!previewAsset || !isFullscreenPreview) return null
 
   const currentIndex = assets.findIndex(a => a.id === previewAsset.id)
-  
-  const navigate = (direction: number) => {
-    let newIndex = currentIndex + direction
-    if (newIndex >= assets.length) newIndex = 0
-    if (newIndex < 0) newIndex = assets.length - 1
-    setPreviewAsset(assets[newIndex])
-  }
 
   // Prevent closing when clicking on the image itself
   const handleContentClick = (e: React.MouseEvent) => {
@@ -45,8 +48,8 @@ export function Lightbox() {
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm"
-        onClick={() => setPreviewAsset(null)}
+        className="fixed inset-0 z-[200] flex items-center justify-center bg-black/90 backdrop-blur-sm"
+        onClick={() => setFullscreenPreview(false)}
       >
         {/* Top Bar */}
         <div 
@@ -68,7 +71,7 @@ export function Lightbox() {
             </button>
             <div className="w-px h-6 bg-white/20 mx-2" />
             <button 
-              onClick={() => setPreviewAsset(null)}
+              onClick={() => setFullscreenPreview(false)}
               className="p-2 hover:text-white hover:bg-red-500/80 rounded-full transition-colors"
             >
               <X className="w-6 h-6" />

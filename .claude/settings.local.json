@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tree:*)",
+      "Bash(cat:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo test:*)",
+      "Bash(npx tsc:*)",
+      "Skill(superpowers:brainstorming)",
+      "Bash(findstr:*)",
+      "mcp__web-search-prime__web_search_prime",
+      "mcp__web-reader__webReader",
+      "Bash(cd:*)",
+      "Bash(npm run tauri dev:*)",
+      "Bash(npx tauri dev:*)",
+      "Bash(git checkout:*)",
+      "Bash(powershell:*)"
+    ]
+  }
+}

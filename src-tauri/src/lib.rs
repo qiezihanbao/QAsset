@@ -7,9 +7,8 @@ use std::io::Cursor;
 use rusqlite::{params, Connection, Result as SqlResult};
 use tauri::{Manager, State, Emitter};
 use img_hash::{HasherConfig};
-use notify::{Watcher, RecursiveMode, RecommendedWatcher, Event};
+use notify::{Watcher, RecursiveMode};
 use std::sync::mpsc::channel;
-use std::thread;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AssetInfo {
@@ -28,6 +27,10 @@ pub struct AssetInfo {
     pub modified_at: u64,            // timestamp
     pub p_hash: Option<String>,      // Perceptual hash for similarity search
     pub is_trashed: bool,            // Trash flag
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub source_url: Option<String>,
+    pub duration: Option<f64>,
 }
 
 pub struct AppState {
@@ -67,13 +70,18 @@ pub fn init_db(db_path: &Path) -> SqlResult<()> {
     let _ = conn.execute("ALTER TABLE assets ADD COLUMN modified_at INTEGER DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE assets ADD COLUMN p_hash TEXT", []);
     let _ = conn.execute("ALTER TABLE assets ADD COLUMN is_trashed INTEGER DEFAULT 0", []);
+    let _ = conn.execute("ALTER TABLE assets ADD COLUMN width INTEGER", []);
+    let _ = conn.execute("ALTER TABLE assets ADD COLUMN height INTEGER", []);
+    let _ = conn.execute("ALTER TABLE assets ADD COLUMN source_url TEXT", []);
+    let _ = conn.execute("ALTER TABLE assets ADD COLUMN duration REAL", []);
 
     Ok(())
 }
 
-fn get_image_metadata(path: &Path) -> (Option<String>, Option<String>, Option<String>) {
+fn get_image_metadata(path: &Path) -> (Option<String>, Option<String>, Option<String>, Option<u32>, Option<u32>) {
     match image::open(path) {
         Ok(img) => {
+            let (width, height) = img.dimensions();
             // 1. Generate Thumbnail
             let thumb = img.thumbnail(256, 256);
             let mut buf = Cursor::new(Vec::new());
@@ -116,9 +124,9 @@ fn get_image_metadata(path: &Path) -> (Option<String>, Option<String>, Option<St
             let hash = hasher.hash_image(&img);
             let p_hash_str = Some(hash.to_base64());
 
-            (color_hex, thumb_b64, p_hash_str)
+            (color_hex, thumb_b64, p_hash_str, Some(width), Some(height))
         },
-        Err(_) => (None, None, None)
+        Err(_) => (None, None, None, None, None)
     }
 }
 
@@ -184,7 +192,7 @@ async fn scan_directory(
             if path.is_file() {
                 let path_str = path.to_string_lossy().into_owned();
                 
-                let mut stmt = tx.prepare("SELECT name, path, asset_type, size, dominant_color, thumbnail_base64, tags, description, rating, workspace_ids, created_at, modified_at, p_hash, is_trashed FROM assets WHERE id = ?1").map_err(|e| e.to_string())?;
+                let mut stmt = tx.prepare("SELECT name, path, asset_type, size, dominant_color, thumbnail_base64, tags, description, rating, workspace_ids, created_at, modified_at, p_hash, is_trashed, width, height, source_url, duration FROM assets WHERE id = ?1").map_err(|e| e.to_string())?;
                 let existing: Option<AssetInfo> = stmt.query_row(params![path_str], |row| {
                     Ok(AssetInfo {
                         id: path_str.clone(),
@@ -202,6 +210,10 @@ async fn scan_directory(
                         modified_at: row.get(11)?,
                         p_hash: row.get(12)?,
                         is_trashed: row.get::<_, i32>(13).unwrap_or(0) != 0,
+                        width: row.get(14).unwrap_or(None),
+                        height: row.get(15).unwrap_or(None),
+                        source_url: row.get(16).unwrap_or(None),
+                        duration: row.get(17).unwrap_or(None),
                     })
                 }).ok();
 
@@ -225,10 +237,10 @@ async fn scan_directory(
                     None => "unknown",
                 }.to_string();
 
-                let (dominant_color, thumbnail_base64, p_hash) = if asset_type == "image" {
+                let (dominant_color, thumbnail_base64, p_hash, width, height) = if asset_type == "image" {
                     get_image_metadata(path)
                 } else {
-                    (None, None, None)
+                    (None, None, None, None, None)
                 };
 
                 let created_at = std::fs::metadata(&path)
@@ -257,11 +269,15 @@ async fn scan_directory(
                     modified_at,
                     p_hash: p_hash.clone(),
                     is_trashed: false,
+                    width,
+                    height,
+                    source_url: None,
+                    duration: None,
                 };
 
                 tx.execute(
-                    "INSERT INTO assets (id, name, path, asset_type, size, dominant_color, thumbnail_base64, tags, description, rating, workspace_ids, created_at, modified_at, p_hash, is_trashed) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-                    params![asset.id, asset.name, asset.path, asset.asset_type, asset.size, asset.dominant_color, asset.thumbnail_base64, asset.tags, asset.description, asset.rating, asset.workspace_ids, asset.created_at, asset.modified_at, asset.p_hash, 0],
+                    "INSERT INTO assets (id, name, path, asset_type, size, dominant_color, thumbnail_base64, tags, description, rating, workspace_ids, created_at, modified_at, p_hash, is_trashed, width, height, source_url, duration) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                    params![asset.id, asset.name, asset.path, asset.asset_type, asset.size, asset.dominant_color, asset.thumbnail_base64, asset.tags, asset.description, asset.rating, asset.workspace_ids, asset.created_at, asset.modified_at, asset.p_hash, 0, asset.width, asset.height, asset.source_url, asset.duration],
                 ).map_err(|e| e.to_string())?;
 
                 assets.push(asset);
@@ -281,7 +297,7 @@ async fn get_all_assets(state: State<'_, AppState>) -> Result<Vec<AssetInfo>, St
     let db_path = state.db_path.clone();
     tokio::task::spawn_blocking(move || {
         let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
-        let mut stmt = conn.prepare("SELECT id, name, path, asset_type, size, dominant_color, thumbnail_base64, tags, description, rating, workspace_ids, created_at, modified_at, p_hash, is_trashed FROM assets").map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare("SELECT id, name, path, asset_type, size, dominant_color, thumbnail_base64, tags, description, rating, workspace_ids, created_at, modified_at, p_hash, is_trashed, width, height, source_url, duration FROM assets").map_err(|e| e.to_string())?;
         let asset_iter = stmt.query_map([], |row| {
             Ok(AssetInfo {
                 id: row.get(0)?,
@@ -299,6 +315,10 @@ async fn get_all_assets(state: State<'_, AppState>) -> Result<Vec<AssetInfo>, St
                 modified_at: row.get(12)?,
                 p_hash: row.get(13)?,
                 is_trashed: row.get::<_, i32>(14).unwrap_or(0) != 0,
+                width: row.get(15).unwrap_or(None),
+                height: row.get(16).unwrap_or(None),
+                source_url: row.get(17).unwrap_or(None),
+                duration: row.get(18).unwrap_or(None),
             })
         }).map_err(|e| e.to_string())?;
 
@@ -322,24 +342,43 @@ async fn update_asset(
     rating: Option<u8>,
     workspace_ids: Option<String>,
     is_trashed: Option<bool>,
+    width: Option<u32>,
+    height: Option<u32>,
+    source_url: Option<String>,
+    duration: Option<f64>,
+    created_at: Option<u64>,
     state: State<'_, AppState>
 ) -> Result<(), String> {
     let db_path = state.db_path.clone();
     tokio::task::spawn_blocking(move || {
         let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
         
-        if let Some(trashed) = is_trashed {
-            let trashed_int = if trashed { 1 } else { 0 };
-            conn.execute(
-                "UPDATE assets SET tags = ?1, description = ?2, rating = ?3, workspace_ids = ?4, is_trashed = ?5 WHERE id = ?6",
-                params![tags, description, rating, workspace_ids, trashed_int, id],
-            ).map_err(|e| e.to_string())?;
-        } else {
-            conn.execute(
-                "UPDATE assets SET tags = ?1, description = ?2, rating = ?3, workspace_ids = ?4 WHERE id = ?5",
-                params![tags, description, rating, workspace_ids, id],
-            ).map_err(|e| e.to_string())?;
-        }
+        // Fetch current asset to not overwrite with NULLs if not provided (since frontend might not pass all fields)
+        let mut stmt = conn.prepare("SELECT tags, description, rating, workspace_ids, is_trashed, width, height, source_url, duration, created_at FROM assets WHERE id = ?1").map_err(|e| e.to_string())?;
+        
+        let (cur_tags, cur_desc, cur_rating, cur_ws, cur_trashed, cur_width, cur_height, cur_source_url, cur_duration, cur_created_at): (Option<String>, Option<String>, Option<u8>, Option<String>, i32, Option<u32>, Option<u32>, Option<String>, Option<f64>, u64) = stmt.query_row(params![id], |row| {
+            Ok((
+                row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, 
+                row.get::<_, i32>(4).unwrap_or(0),
+                row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9).unwrap_or(0)
+            ))
+        }).map_err(|e| e.to_string())?;
+
+        let new_tags = tags.or(cur_tags);
+        let new_desc = description.or(cur_desc);
+        let new_rating = rating.or(cur_rating);
+        let new_ws = workspace_ids.or(cur_ws);
+        let new_trashed = is_trashed.map(|t| if t { 1 } else { 0 }).unwrap_or(cur_trashed);
+        let new_width = width.or(cur_width);
+        let new_height = height.or(cur_height);
+        let new_source_url = source_url.or(cur_source_url);
+        let new_duration = duration.or(cur_duration);
+        let new_created_at = created_at.unwrap_or(cur_created_at);
+
+        conn.execute(
+            "UPDATE assets SET tags = ?1, description = ?2, rating = ?3, workspace_ids = ?4, is_trashed = ?5, width = ?6, height = ?7, source_url = ?8, duration = ?9, created_at = ?10 WHERE id = ?11",
+            params![new_tags, new_desc, new_rating, new_ws, new_trashed, new_width, new_height, new_source_url, new_duration, new_created_at, id],
+        ).map_err(|e| e.to_string())?;
         
         Ok(())
     })

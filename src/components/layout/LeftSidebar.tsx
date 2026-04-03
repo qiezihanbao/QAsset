@@ -1,12 +1,13 @@
 import { useState, useRef, useEffect } from "react"
-import { Menu, Target, CheckSquare, Tags, Trash2, Globe, Box, Folder, Plus, ChevronRight, CheckCircle, ChevronDown, Check } from "lucide-react"
+import { Menu, Target, CheckSquare, Tags, Trash2, Box, Folder, Plus, ChevronRight, ChevronDown, Check, X } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import { open } from "@tauri-apps/plugin-dialog"
-import { useAssetStore, getSafeArray } from "@/store/useAssetStore"
+import { useAssetStore, type Asset } from "@/store/useAssetStore"
 import * as ContextMenu from '@radix-ui/react-context-menu'
+import { isMobile } from "@/lib/utils"
 
 export function LeftSidebar() {
-  const { assets, setAssets, workspaces, activeWorkspaceId, activeView, setActiveView, addWorkspace } = useAssetStore()
+  const { assets, setAssets, workspaces, activeWorkspaceId, activeView, setActiveView, addWorkspace, toggleLeftSidebar } = useAssetStore()
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [isAddingWorkspace, setIsAddingWorkspace] = useState(false)
   const [newWorkspaceName, setNewWorkspaceName] = useState("")
@@ -42,7 +43,7 @@ export function LeftSidebar() {
             >
               从快捷项移除
             </ContextMenu.Item>
-            <ContextMenu.Separator className="h-[1px] bg-zinc-200 dark:bg-zinc-800 m-1" />
+            <ContextMenu.Separator className="h-px bg-zinc-200 dark:bg-zinc-800 m-1" />
             <ContextMenu.Sub>
               <ContextMenu.SubTrigger className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer justify-between">
                 显示/隐藏快捷项
@@ -121,13 +122,14 @@ export function LeftSidebar() {
     return () => document.removeEventListener("mousedown", handleClickOutside)
   }, [])
 
-  const getSafeArray = (jsonStr: any) => {
+  const getSafeArray = (jsonStr: string | string[] | null | undefined): string[] => {
     if (!jsonStr) return []
+    if (Array.isArray(jsonStr)) return jsonStr
     try {
       const parsed = JSON.parse(jsonStr)
       return Array.isArray(parsed) ? parsed : []
-    } catch (e) {
-      return Array.isArray(jsonStr) ? jsonStr : []
+    } catch {
+      return []
     }
   }
 
@@ -135,7 +137,7 @@ export function LeftSidebar() {
   const renderFolderTree = () => {
     // 1. Extract unique parent directories from all assets
     const folderPaths = Array.from(new Set(assets.filter(a => !a.is_trashed).map(a => {
-      const parts = a.path.split(/[/[\\]/)
+      const parts = a.path.split(/[\\/]/)
       parts.pop() // remove file name
       return parts.join('/')
     })))
@@ -149,7 +151,7 @@ export function LeftSidebar() {
       let current = root
       let currentPath = ''
 
-      parts.forEach((part, idx) => {
+      parts.forEach((part) => {
         if (!part) return
         currentPath = currentPath ? `${currentPath}/${part}` : part
         if (!current.children[part]) {
@@ -161,7 +163,7 @@ export function LeftSidebar() {
 
     // 3. Count assets for each node
     assets.filter(a => !a.is_trashed).forEach(a => {
-      const parts = a.path.split(/[/[\\]/)
+      const parts = a.path.split(/[\\/]/)
       parts.pop()
       const folderPath = parts.join('/')
       
@@ -246,7 +248,7 @@ export function LeftSidebar() {
     )
   }
 
-  const folderTree = assets.filter(a => !a.is_trashed).length > 0 ? { hasFolders: true } : {}
+  const folderTree: Record<string, boolean> = assets.filter(a => !a.is_trashed).length > 0 ? { hasFolders: true } : {}
 
   const handleImport = async () => {
     setIsMenuOpen(false)
@@ -254,32 +256,37 @@ export function LeftSidebar() {
       const selectedPath = await open({
         directory: true,
         multiple: false,
+        title: "选择包含图片、视频或模型文件的文件夹",
       })
 
       if (selectedPath && typeof selectedPath === 'string') {
-        // Run the scan, which inserts into the DB
-        await invoke("scan_directory", { dirPath: selectedPath })
-        // Start watching the directory for hot-reloading
-        await invoke("start_watcher", { dirPath: selectedPath })
-        // Fetch all assets from DB to update the state
-        const allAssets = await invoke("get_all_assets")
-        setAssets(allAssets as any[])
+        try {
+          // Run the scan, which inserts into the DB
+          await invoke("scan_directory", { dirPath: selectedPath })
+          // Start watching the directory for hot-reloading
+          await invoke("start_watcher", { dirPath: selectedPath })
+          // Fetch all assets from DB to update the state
+          const allAssets = await invoke<Asset[]>("get_all_assets")
+          setAssets(allAssets)
+        } catch (err) {
+          console.warn("Import failed.", err)
+        }
       }
     } catch (err) {
       console.warn("Tauri environment not detected or import failed. Using mock data.", err)
       const mockData = [
-        { id: "1", name: "sebastien-flores-5.jpeg", path: "E:/PixcallLibrary/Pixcall/需求参考/sebastien-flores-5.jpeg", asset_type: "image", size: 377731, dominant_color: "#ffffff", thumbnail_base64: "/mock/sebastien-flores-5.jpeg", workspace_ids: ["2"] },
-        { id: "2", name: "图像-(1).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(1).jpg", asset_type: "image", size: 172804, dominant_color: "#888888", thumbnail_base64: "/mock/图像-(1).jpg", workspace_ids: ["2"] },
-        { id: "3", name: "图像-(1).png", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(1).png", asset_type: "image", size: 220966, dominant_color: "#cccccc", thumbnail_base64: "/mock/图像-(1).png", workspace_ids: ["2"] },
-        { id: "4", name: "图像-(2).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(2).jpg", asset_type: "image", size: 102324, dominant_color: "#ff0000", thumbnail_base64: "/mock/图像-(2).jpg", workspace_ids: ["2"] },
-        { id: "5", name: "图像-(2).png", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(2).png", asset_type: "image", size: 248480, dominant_color: "#00ff00", thumbnail_base64: "/mock/图像-(2).png", workspace_ids: ["2"] },
-        { id: "6", name: "图像-(3).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(3).jpg", asset_type: "image", size: 117623, dominant_color: "#0000ff", thumbnail_base64: "/mock/图像-(3).jpg", workspace_ids: ["2"] },
-        { id: "7", name: "图像-(4).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(4).jpg", asset_type: "image", size: 57073, dominant_color: "#ffff00", thumbnail_base64: "/mock/图像-(4).jpg", workspace_ids: ["2"] },
-        { id: "8", name: "图像-(5).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(5).jpg", asset_type: "image", size: 42371, dominant_color: "#00ffff", thumbnail_base64: "/mock/图像-(5).jpg", workspace_ids: ["2"] },
-        { id: "9", name: "图像-(6).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(6).jpg", asset_type: "image", size: 72415, dominant_color: "#ff00ff", thumbnail_base64: "/mock/图像-(6).jpg", workspace_ids: ["2"] },
-        { id: "10", name: "图像-(7).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(7).jpg", asset_type: "image", size: 37876, dominant_color: "#ffffff", thumbnail_base64: "/mock/图像-(7).jpg", workspace_ids: ["2"] },
-        { id: "11", name: "图像.jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像.jpg", asset_type: "image", size: 474188, dominant_color: "#ffffff", thumbnail_base64: "/mock/图像.jpg", workspace_ids: ["2"] },
-        { id: "12", name: "图像.png", path: "E:/PixcallLibrary/Pixcall/需求参考/图像.png", asset_type: "image", size: 203956, dominant_color: "#ffffff", thumbnail_base64: "/mock/图像.png", workspace_ids: ["2"] },
+        { id: "1", name: "sebastien-flores-5.jpeg", path: "E:/PixcallLibrary/Pixcall/需求参考/sebastien-flores-5.jpeg", asset_type: "image", size: 377731, dominant_color: "#ffffff", thumbnail_base64: "/mock/sebastien-flores-5.jpeg", workspace_ids: '["2"]' },
+        { id: "2", name: "图像-(1).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(1).jpg", asset_type: "image", size: 172804, dominant_color: "#888888", thumbnail_base64: "/mock/图像-(1).jpg", workspace_ids: '["2"]' },
+        { id: "3", name: "图像-(1).png", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(1).png", asset_type: "image", size: 220966, dominant_color: "#cccccc", thumbnail_base64: "/mock/图像-(1).png", workspace_ids: '["2"]' },
+        { id: "4", name: "图像-(2).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(2).jpg", asset_type: "image", size: 102324, dominant_color: "#ff0000", thumbnail_base64: "/mock/图像-(2).jpg", workspace_ids: '["2"]' },
+        { id: "5", name: "图像-(2).png", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(2).png", asset_type: "image", size: 248480, dominant_color: "#00ff00", thumbnail_base64: "/mock/图像-(2).png", workspace_ids: '["2"]' },
+        { id: "6", name: "图像-(3).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(3).jpg", asset_type: "image", size: 117623, dominant_color: "#0000ff", thumbnail_base64: "/mock/图像-(3).jpg", workspace_ids: '["2"]' },
+        { id: "7", name: "图像-(4).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(4).jpg", asset_type: "image", size: 57073, dominant_color: "#ffff00", thumbnail_base64: "/mock/图像-(4).jpg", workspace_ids: '["2"]' },
+        { id: "8", name: "图像-(5).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(5).jpg", asset_type: "image", size: 42371, dominant_color: "#00ffff", thumbnail_base64: "/mock/图像-(5).jpg", workspace_ids: '["2"]' },
+        { id: "9", name: "图像-(6).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(6).jpg", asset_type: "image", size: 72415, dominant_color: "#ff00ff", thumbnail_base64: "/mock/图像-(6).jpg", workspace_ids: '["2"]' },
+        { id: "10", name: "图像-(7).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(7).jpg", asset_type: "image", size: 37876, dominant_color: "#ffffff", thumbnail_base64: "/mock/图像-(7).jpg", workspace_ids: '["2"]' },
+        { id: "11", name: "图像.jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像.jpg", asset_type: "image", size: 474188, dominant_color: "#ffffff", thumbnail_base64: "/mock/图像.jpg", workspace_ids: '["2"]' },
+        { id: "12", name: "图像.png", path: "E:/PixcallLibrary/Pixcall/需求参考/图像.png", asset_type: "image", size: 203956, dominant_color: "#ffffff", thumbnail_base64: "/mock/图像.png", workspace_ids: '["2"]' },
       ]
       setAssets(mockData)
       alert("已加载 E:\\PixcallLibrary\\Pixcall\\需求参考 的真实本地测试图片！")
@@ -301,8 +308,8 @@ export function LeftSidebar() {
           await invoke("delete_asset", { id })
         }
         // Fetch all assets from DB to update the state
-        const allAssets = await invoke("get_all_assets")
-        setAssets(allAssets as any[])
+        const allAssets = await invoke<Asset[]>("get_all_assets")
+        setAssets(allAssets)
         alert("清理完成！")
       }
     } catch (err) {
@@ -312,7 +319,10 @@ export function LeftSidebar() {
   }
 
   return (
-    <aside className="w-64 border-r border-zinc-200 dark:border-zinc-800 bg-[#fafafa] dark:bg-zinc-950 flex flex-col h-full shrink-0">
+    <aside className={isMobile
+      ? "fixed inset-y-0 left-0 z-40 flex h-full w-[min(18rem,calc(100vw-1rem))] shrink-0 flex-col border-r border-zinc-200 bg-[#fafafa] shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+      : "static z-0 flex h-full w-56 shrink-0 flex-col border-r border-zinc-200 bg-[#fafafa] dark:border-zinc-800 dark:bg-zinc-950"
+    }>
       {/* Top Header */}
       <div className="flex items-center gap-4 px-4 py-4 relative">
         <div ref={menuRef}>
@@ -349,6 +359,12 @@ export function LeftSidebar() {
         <div className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center text-white shadow-sm">
           <Target className="w-5 h-5" />
         </div>
+        <button
+          onClick={toggleLeftSidebar}
+          className="ml-auto rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-800 lg:hidden"
+        >
+          <X className="h-4 w-4" />
+        </button>
       </div>
 
       {/* Account Info */}
@@ -373,10 +389,22 @@ export function LeftSidebar() {
       <div className="flex-1 overflow-y-auto px-3">
         {/* Main Navigation */}
         <nav className="space-y-0.5 mb-6">
-          <NavItem id="nav-all" icon={<Box />} label="全部文件" count={assets.filter(a => !a.is_trashed).length} active={activeView === 'all'} onClick={() => setActiveView('all')} />
-          <NavItem id="nav-unorganized" icon={<CheckSquare />} label="待整理文件" count={assets.filter(a => !a.is_trashed && (!a.workspace_ids || a.workspace_ids === "[]") && (!a.tags || a.tags === "[]")).length} active={activeView === 'unorganized'} onClick={() => setActiveView('unorganized')} />
-          <NavItem id="nav-tags" icon={<Tags />} label="全部标签" count={Array.from(new Set(assets.flatMap(a => getSafeArray(a.tags)))).length} active={activeView === 'tags'} onClick={() => setActiveView('tags')} />
-          <NavItem id="nav-trash" icon={<Trash2 />} label="废纸篓" count={assets.filter(a => a.is_trashed).length} active={activeView === 'trash'} onClick={() => setActiveView('trash')} />
+          {visibleShortcuts.all && renderNavContextMenu(
+            <NavItem id="nav-all" icon={<Box />} label="全部文件" count={assets.filter(a => !a.is_trashed).length} active={activeView === 'all'} onClick={() => setActiveView('all')} />,
+            'all'
+          )}
+          {visibleShortcuts.unorganized && renderNavContextMenu(
+            <NavItem id="nav-unorganized" icon={<CheckSquare />} label="待整理文件" count={assets.filter(a => !a.is_trashed && getSafeArray(a.workspace_ids).length === 0 && getSafeArray(a.tags).length === 0).length} active={activeView === 'unorganized'} onClick={() => setActiveView('unorganized')} />,
+            'unorganized'
+          )}
+          {visibleShortcuts.tags && renderNavContextMenu(
+            <NavItem id="nav-tags" icon={<Tags />} label="全部标签" count={Array.from(new Set(assets.flatMap(a => getSafeArray(a.tags)))).length} active={activeView === 'tags'} onClick={() => setActiveView('tags')} />,
+            'tags'
+          )}
+          {visibleShortcuts.trash && renderNavContextMenu(
+            <NavItem id="nav-trash" icon={<Trash2 />} label="废纸篓" count={assets.filter(a => a.is_trashed).length} active={activeView === 'trash'} onClick={() => setActiveView('trash')} />,
+            'trash'
+          )}
           
           {/* Workspaces Header */}
           <div className="pt-4 pb-1 px-2 flex items-center justify-between group">
@@ -422,26 +450,52 @@ export function LeftSidebar() {
             const count = assets.filter(a => {
               if (!a.workspace_ids) return false;
               try {
-                const parsed = JSON.parse(a.workspace_ids as any as string);
-                return Array.isArray(parsed) && parsed.includes(ws.id);
-              } catch (e) {
+                const currentWs = typeof a.workspace_ids === 'string' ? JSON.parse(a.workspace_ids) : []
+                return Array.isArray(currentWs) && currentWs.includes(ws.id);
+              } catch {
                 // If it's already an array or parsing fails
                 if (Array.isArray(a.workspace_ids)) {
-                  return (a.workspace_ids as unknown as string[]).includes(ws.id);
+                  return (a.workspace_ids as string[]).includes(ws.id)
                 }
                 return false;
               }
             }).length;
             
             return (
-              <NavItem 
-                key={ws.id}
-                icon={<Box />} 
-                label={ws.name} 
-                count={count}
-                active={activeView === 'workspace' && activeWorkspaceId === ws.id}
-                onClick={() => setActiveView('workspace', ws.id)}
-              />
+              <ContextMenu.Root key={ws.id}>
+                <ContextMenu.Trigger>
+                  <NavItem 
+                    icon={<Box />} 
+                    label={ws.name} 
+                    count={count}
+                    active={activeView === 'workspace' && activeWorkspaceId === ws.id}
+                    onClick={() => setActiveView('workspace', ws.id)}
+                  />
+                </ContextMenu.Trigger>
+                <ContextMenu.Portal>
+                  <ContextMenu.Content 
+                    className="min-w-[160px] bg-white dark:bg-zinc-900 rounded-md overflow-hidden p-1 shadow-[0px_10px_38px_-10px_rgba(22,_23,_24,_0.35),_0px_10px_20px_-15px_rgba(22,_23,_24,_0.2)] border border-zinc-200 dark:border-zinc-800 animate-in fade-in-80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95 z-50"
+                  >
+                    <ContextMenu.Item 
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        // Handle delete workspace
+                        const confirmDelete = window.confirm('确定要删除此工作区吗？这不会删除其中的文件。')
+                        if (confirmDelete) {
+                          const newWorkspaces = workspaces.filter(w => w.id !== ws.id)
+                          useAssetStore.setState({ workspaces: newWorkspaces })
+                          if (activeWorkspaceId === ws.id) {
+                            setActiveView('all')
+                          }
+                        }
+                      }}
+                      className="group text-[13px] leading-none text-red-600 dark:text-red-400 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-red-500 data-[highlighted]:text-white cursor-pointer"
+                    >
+                      删除工作区
+                    </ContextMenu.Item>
+                  </ContextMenu.Content>
+                </ContextMenu.Portal>
+              </ContextMenu.Root>
             )
           })}
           
@@ -460,7 +514,7 @@ export function LeftSidebar() {
           <h3 className="text-[11px] font-semibold text-zinc-400 mb-2 px-2">物理文件夹</h3>
           <nav className="space-y-0.5">
             {Object.keys(folderTree).length > 0 ? (
-              renderFolderTree(folderTree)
+              renderFolderTree()
             ) : (
               <div className="px-2 text-xs text-zinc-500 italic">暂无本地文件夹</div>
             )}
@@ -491,42 +545,19 @@ function NavItem({ icon, label, count, active, onClick, id }: { icon: React.Reac
     <button
       id={id}
       onClick={onClick}
-      className={`w-full flex items-center justify-between px-2 py-1.5 rounded-md text-[13px] font-medium transition-colors ${
+      className={`w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-md text-[13px] font-medium transition-colors ${
         active
           ? "bg-zinc-200/60 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-50"
           : "text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/40 dark:hover:bg-zinc-800/50 hover:text-zinc-900 dark:hover:text-zinc-50"
       }`}
     >
-      <div className="flex items-center gap-2.5">
+      <div className="flex min-w-0 items-center gap-2.5">
         <div className="w-4 h-4 flex items-center justify-center opacity-70">{icon}</div>
-        {label}
+        <span className="truncate">{label}</span>
       </div>
-      {count !== undefined && <span className="text-xs text-zinc-400 opacity-80">{count}</span>}
+      {count !== undefined && <span className="shrink-0 text-xs text-zinc-400 opacity-80">{count}</span>}
     </button>
   )
 }
 
-function FolderItem({ label, count, indent, defaultOpen, children }: { label: string; count?: number; indent?: boolean; defaultOpen?: boolean; children?: React.ReactNode }) {
-  const [isOpen, setIsOpen] = useState(defaultOpen)
-  
-  return (
-    <div>
-      <button
-        onClick={() => setIsOpen(!isOpen)}
-        className={`w-full flex items-center justify-between px-2 py-1.5 rounded-md text-[13px] text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/40 dark:hover:bg-zinc-800/50 hover:text-zinc-900 dark:hover:text-zinc-50 transition-colors ${indent ? 'pl-6' : ''}`}
-      >
-        <div className="flex items-center gap-1.5 truncate">
-          {children ? (isOpen ? <ChevronDown className="w-3.5 h-3.5 opacity-50 shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 opacity-50 shrink-0" />) : <div className="w-3.5 h-3.5 shrink-0" />}
-          <Folder className="w-3.5 h-3.5 opacity-70 shrink-0" />
-          <span className="truncate">{label}</span>
-        </div>
-        {count !== undefined && count > 0 && <span className="text-xs text-zinc-400 opacity-80 shrink-0">{count}</span>}
-      </button>
-      {isOpen && children && (
-        <div className="mt-0.5">
-          {children}
-        </div>
-      )}
-    </div>
-  )
-}
+

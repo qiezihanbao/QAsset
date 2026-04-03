@@ -52,6 +52,11 @@ fn test_asset_info_serialization() {
         created_at: 1234567890,
         modified_at: 1234567890,
         p_hash: None,
+        is_trashed: false,
+        width: Some(1920),
+        height: Some(1080),
+        source_url: Some("https://example.com".to_string()),
+        duration: None,
     };
     
     let json = serde_json::to_string(&asset).unwrap();

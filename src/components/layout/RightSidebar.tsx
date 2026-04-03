@@ -2,34 +2,68 @@ import { useState, useEffect } from "react"
 import { ExternalLink, Star, Plus, X } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import { useAssetStore } from "@/store/useAssetStore"
+import { isMobile } from "@/lib/utils"
+
+const hasTauriRuntime = () => Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__)
 
 export function RightSidebar() {
-  const { selectedAsset, workspaces, updateAssetProperty, setSimilarAssetIds } = useAssetStore()
+  const { assets, selectedAssets, workspaces, updateAssetProperty, setSimilarAssetIds, toggleRightSidebar } = useAssetStore()
+  const selectedAsset = assets.find((asset) => asset.id === selectedAssets[0]) ?? null
   const [descInput, setDescInput] = useState("")
+  const [sourceUrlInput, setSourceUrlInput] = useState("")
   const [tagInput, setTagInput] = useState("")
   const [isSearchingSimilar, setIsSearchingSimilar] = useState(false)
   
   useEffect(() => {
     if (selectedAsset) {
       setDescInput(selectedAsset.description || "")
+      setSourceUrlInput(selectedAsset.source_url || "")
     }
   }, [selectedAsset])
 
   if (!selectedAsset) {
     return (
-      <aside className="w-72 border-l border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 flex flex-col h-full shrink-0">
+      <aside className={isMobile
+        ? "fixed inset-y-0 right-0 z-40 flex h-full w-[min(20rem,calc(100vw-1rem))] shrink-0 flex-col border-l border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+        : "flex h-full w-72 shrink-0 flex-col border-l border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
+      }>
         <div className="p-4 flex-1 flex flex-col items-center justify-center text-zinc-500">
+          {isMobile && (
+            <button
+              onClick={toggleRightSidebar}
+              className="absolute right-4 top-4 rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
           <p className="text-sm">Select an asset to view properties</p>
         </div>
       </aside>
     )
   }
 
-  const safeInvoke = async (command: string, args?: any) => {
-    if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
+  const safeInvoke = async (command: string, args?: Record<string, unknown>) => {
+    if (hasTauriRuntime()) {
       return await invoke(command, args)
     } else {
       console.warn(`Tauri environment not detected. Skipped command: ${command}`, args)
+    }
+  }
+
+  const handleUpdateSourceUrl = async () => {
+    if (sourceUrlInput === selectedAsset.source_url) return
+    updateAssetProperty(selectedAsset.id, { source_url: sourceUrlInput })
+    try {
+      await safeInvoke("update_asset", {
+        id: selectedAsset.id,
+        tags: selectedAsset.tags || null,
+        description: selectedAsset.description || null,
+        rating: selectedAsset.rating || null,
+        workspace_ids: selectedAsset.workspace_ids || null,
+        source_url: sourceUrlInput || null
+      })
+    } catch (err) {
+      console.error("Failed to update source URL:", err)
     }
   }
 
@@ -65,13 +99,14 @@ export function RightSidebar() {
     }
   }
 
-  const getSafeArray = (jsonStr: any) => {
+  const getSafeArray = (jsonStr: string | string[] | null | undefined): string[] => {
     if (!jsonStr) return []
+    if (Array.isArray(jsonStr)) return jsonStr
     try {
       const parsed = JSON.parse(jsonStr)
       return Array.isArray(parsed) ? parsed : []
-    } catch (e) {
-      return Array.isArray(jsonStr) ? jsonStr : []
+    } catch {
+      return []
     }
   }
 
@@ -126,8 +161,8 @@ export function RightSidebar() {
       newWsIds = [...currentWsIds, workspaceId]
     }
     
-    const newWsIdsStr = newWsIds.length > 0 ? JSON.stringify(newWsIds) : null
-    updateAssetProperty(selectedAsset.id, { workspace_ids: newWsIdsStr as any })
+    const newWsIdsStr = newWsIds.length > 0 ? JSON.stringify(newWsIds) : undefined
+    updateAssetProperty(selectedAsset.id, { workspace_ids: newWsIdsStr })
     
     try {
       await safeInvoke("update_asset", {
@@ -135,7 +170,7 @@ export function RightSidebar() {
         tags: selectedAsset.tags || null,
         description: selectedAsset.description || null,
         rating: selectedAsset.rating || null,
-        workspace_ids: newWsIdsStr
+        workspace_ids: newWsIdsStr || null
       })
     } catch (err) {
       console.error("Failed to update workspaces:", err)
@@ -168,9 +203,25 @@ export function RightSidebar() {
   }
 
   return (
-    <aside className="w-72 border-l border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 flex flex-col h-full shrink-0">
+    <aside className={isMobile
+      ? "fixed inset-y-0 right-0 z-40 flex h-full w-[min(20rem,calc(100vw-1rem))] shrink-0 flex-col border-l border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+      : "flex h-full w-72 shrink-0 flex-col border-l border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
+    }>
       <div className="p-5 flex-1 overflow-y-auto no-scrollbar">
-        <h2 className="text-sm font-semibold mb-6 text-center text-zinc-900 dark:text-zinc-100">文件信息</h2>
+        {isMobile && (
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">文件信息</h2>
+            <button
+              onClick={toggleRightSidebar}
+              className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        )}
+        {!isMobile && (
+          <h2 className="mb-6 text-center text-sm font-semibold text-zinc-900 dark:text-zinc-100">文件信息</h2>
+        )}
         
         <div className="space-y-6">
           <div>
@@ -268,12 +319,24 @@ export function RightSidebar() {
               {/* Source URL */}
               <div>
                 <p className="text-xs text-zinc-500 mb-1.5">来源网址</p>
-                <a href="#" className="text-[13px] text-indigo-500 hover:underline flex items-start gap-1 group break-all">
-                  <span className="line-clamp-3">
-                    https://x.com/neco_person/status/1841005574554862069/photo/1
-                  </span>
-                  <ExternalLink className="w-3.5 h-3.5 mt-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
-                </a>
+                <div className="flex flex-col gap-2">
+                  <input
+                    type="text"
+                    value={sourceUrlInput}
+                    onChange={(e) => setSourceUrlInput(e.target.value)}
+                    onBlur={handleUpdateSourceUrl}
+                    placeholder="添加来源网址..."
+                    className="w-full p-2 bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-md text-[13px] text-zinc-700 dark:text-zinc-300 focus:outline-none focus:border-indigo-500 transition-colors"
+                  />
+                  {selectedAsset.source_url && (
+                    <a href={selectedAsset.source_url} target="_blank" rel="noreferrer" className="text-[13px] text-indigo-500 hover:underline flex items-start gap-1 group break-all">
+                      <span className="line-clamp-3">
+                        {selectedAsset.source_url}
+                      </span>
+                      <ExternalLink className="w-3.5 h-3.5 mt-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
+                    </a>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -285,42 +348,40 @@ export function RightSidebar() {
               <div className="flex justify-between">
                 <span className="text-zinc-500">评分</span>
                 <div className="flex text-zinc-300 dark:text-zinc-700">
-                  {[1, 2, 3, 4, 5].map((star) => (
-                    <button key={star} onClick={() => handleRating(star)} className="focus:outline-none transition-colors">
-                      <Star 
-                        className={`w-3.5 h-3.5 ${(selectedAsset.rating || 0) >= star ? "fill-yellow-400 text-yellow-400" : "hover:text-yellow-400"}`} 
-                      />
-                    </button>
-                  ))}
-                </div>
+          {[1, 2, 3, 4, 5].map((star) => (
+            <button key={star} onClick={() => handleRating(star)} className="focus:outline-none transition-colors">
+              <Star 
+                className={`w-3.5 h-3.5 ${(selectedAsset.rating || 0) >= star ? "fill-yellow-400 text-yellow-400" : "hover:text-yellow-400"}`} 
+              />
+            </button>
+          ))}
+        </div>
               </div>
               <div className="flex justify-between">
                 <span className="text-zinc-500">尺寸</span>
-                <span className="text-zinc-700 dark:text-zinc-300">{selectedAsset.asset_type === 'image' ? '1011x1400' : '-'}</span>
+                <span className="text-zinc-700 dark:text-zinc-300">{selectedAsset.width && selectedAsset.height ? `${selectedAsset.width}x${selectedAsset.height}` : '-'}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-zinc-500">文件类型</span>
-                <span className="text-zinc-700 dark:text-zinc-300">{selectedAsset.asset_type === 'image' ? 'JPEG' : selectedAsset.asset_type.toUpperCase()}</span>
+                <span className="text-zinc-700 dark:text-zinc-300">{selectedAsset.path.split('.').pop()?.toUpperCase() || selectedAsset.asset_type.toUpperCase()}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-zinc-500">文件大小</span>
                 <span className="text-zinc-700 dark:text-zinc-300">{formatSize(selectedAsset.size)}</span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-zinc-500">导入时间</span>
-                <span className="text-zinc-700 dark:text-zinc-300">2025/01/02 00:39:44</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-zinc-500">更新时间</span>
-                <span className="text-zinc-700 dark:text-zinc-300">2025/01/02 00:39:44</span>
-              </div>
+              {selectedAsset.duration && (
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">时长</span>
+                  <span className="text-zinc-700 dark:text-zinc-300">{Math.round(selectedAsset.duration)}s</span>
+                </div>
+              )}
               <div className="flex justify-between">
                 <span className="text-zinc-500">创建时间</span>
-                <span className="text-zinc-700 dark:text-zinc-300">2025/01/02 00:39:44</span>
+                <span className="text-zinc-700 dark:text-zinc-300">{selectedAsset.created_at ? new Date(selectedAsset.created_at * 1000).toLocaleString() : '-'}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-zinc-500">修改时间</span>
-                <span className="text-zinc-700 dark:text-zinc-300">2025/01/02 00:39:44</span>
+                <span className="text-zinc-700 dark:text-zinc-300">{selectedAsset.modified_at ? new Date(selectedAsset.modified_at * 1000).toLocaleString() : '-'}</span>
               </div>
             </div>
           </div>

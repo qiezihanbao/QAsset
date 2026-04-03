@@ -36,7 +36,7 @@ export function TagsView() {
   const sortedGroups = Object.keys(groupedTags).sort()
 
   const handleTagClick = (tag: string) => {
-    setTagFilter(tag)
+    setTagFilter([tag])
     setActiveView('all') // Switch to all view with the tag filter applied
   }
 

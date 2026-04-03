@@ -582,7 +582,7 @@ export function AssetsPage() {
   const rowVirtualizer = useVirtualizer({
     count: rowCount,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => thumbnailSize + 60, // approximate height of card + text + margin
+    estimateSize: () => thumbnailSize + 90, // image height + label area (name ~26px + size ~20px + margins ~16px + row gap ~12px + safety)
     overscan: 5,
   })
 
@@ -898,11 +898,13 @@ export function AssetsPage() {
                       top: 0,
                       left: 0,
                       width: '100%',
-                      height: `${virtualRow.size}px`,
+                      minHeight: `${virtualRow.size}px`,
                       transform: `translateY(${virtualRow.start}px)`,
                       display: 'grid',
                       gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))`,
                       gap: `${gap}px`,
+                      paddingBottom: `${gap / 2}px`,
+                      overflow: 'visible',
                     }}
                   >
                     {Array.from({ length: columnCount }).map((_, columnIndex) => {
