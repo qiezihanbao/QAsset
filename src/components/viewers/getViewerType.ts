@@ -3,7 +3,7 @@
 const IMAGE_EXTENSIONS = new Set([
   'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif',
   'tif', 'tiff', 'jfif', 'jpe', 'jxl', 'base64', 'heic', 'heif',
-  'hif', 'icns', 'eps', 'ttf', 'insp'
+  'hif', 'icns', 'eps', 'ttf', 'insp', 'psd', 'psb', 'clip'
 ])
 
 const TEXT_EXTENSIONS = new Set([

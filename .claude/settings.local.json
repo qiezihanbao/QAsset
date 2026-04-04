@@ -27,7 +27,19 @@
       "Bash(npm run:*)",
       "Bash(node:*)",
       "Bash(git rev-parse:*)",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(rustc:*)",
+      "WebSearch",
+      "mcp__zread__read_file",
+      "Bash(curl:*)",
+      "Bash(cargo doc:*)",
+      "Bash(cargo run:*)",
+      "Bash(find:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(cargo tree:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(python:*)"
     ]
   }
 }

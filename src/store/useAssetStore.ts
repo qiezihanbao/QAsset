@@ -20,6 +20,7 @@ export interface AssetLite {
   path: string
   asset_type: string
   size: number
+  thumbnail_path?: string
   dominant_color?: string
   width?: number
   height?: number
@@ -145,6 +146,7 @@ interface AssetStore {
   tagsSummary: Record<string, number>
   isLoadingTagsSummary: boolean
   folderFilter: string[] | null
+  folderPreviewVisibility: Record<string, boolean>
   shapeFilter: string[] | null // 'horizontal', 'vertical', 'square'
   ratingFilter: number[] | null
   sizeFilter: string[] | null
@@ -156,7 +158,7 @@ interface AssetStore {
   isLeftSidebarVisible: boolean
   isRightSidebarVisible: boolean
   thumbnailSize: number
-  layoutMode: "grid" | "masonry"
+  layoutMode: "grid" | "masonry" | "canvas"
   sortConfig: SortConfig
   similarAssetIds: string[] | null
 
@@ -193,6 +195,7 @@ interface AssetStore {
   setTagFilter: (filter: string[] | null) => void
   refreshTagsSummary: () => Promise<void>
   setFolderFilter: (filter: string[] | null) => void
+  setFolderPreviewVisibility: (path: string, visible: boolean) => void
   setShapeFilter: (filter: string[] | null) => void
   setRatingFilter: (filter: number[] | null) => void
   setSizeFilter: (filter: string[] | null) => void
@@ -205,7 +208,7 @@ interface AssetStore {
   toggleLeftSidebar: () => void
   toggleRightSidebar: () => void
   setThumbnailSize: (size: number) => void
-  setLayoutMode: (mode: "grid" | "masonry") => void
+  setLayoutMode: (mode: "grid" | "masonry" | "canvas") => void
   setSortConfig: (config: SortConfig) => void
   setSimilarAssetIds: (ids: string[] | null) => void
 }
@@ -253,6 +256,7 @@ export const useAssetStore = create<AssetStore>((set) => ({
   tagsSummary: {},
   isLoadingTagsSummary: false,
   folderFilter: null,
+  folderPreviewVisibility: {},
   shapeFilter: null,
   ratingFilter: null,
   sizeFilter: null,
@@ -308,6 +312,7 @@ export const useAssetStore = create<AssetStore>((set) => ({
     typeFilter: null,
     tagFilter: null,
     folderFilter: null,
+    folderPreviewVisibility: {},
     shapeFilter: null,
     ratingFilter: null,
     sizeFilter: null,
@@ -360,6 +365,13 @@ export const useAssetStore = create<AssetStore>((set) => ({
     }
   },
   setFolderFilter: (filter) => set({ folderFilter: filter }),
+  setFolderPreviewVisibility: (path, visible) =>
+    set((state) => ({
+      folderPreviewVisibility: {
+        ...state.folderPreviewVisibility,
+        [path]: visible,
+      },
+    })),
   setShapeFilter: (filter) => set({ shapeFilter: filter }),
   setRatingFilter: (filter) => set({ ratingFilter: filter }),
   setSizeFilter: (filter) => set({ sizeFilter: filter }),

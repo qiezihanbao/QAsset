@@ -40,11 +40,17 @@ pub fn thumbnails_dir(library_root: &Path) -> PathBuf {
     quickasset_dir(library_root).join("thumbnails")
 }
 
+pub fn previews_dir(library_root: &Path) -> PathBuf {
+    quickasset_dir(library_root).join("previews")
+}
+
 pub fn create_library(library_root: &Path, name: &str) -> Result<(), String> {
     let qa_dir = quickasset_dir(library_root);
     fs::create_dir_all(&qa_dir).map_err(|e| format!("Failed to create .quickasset: {}", e))?;
     fs::create_dir_all(thumbnails_dir(library_root))
         .map_err(|e| format!("Failed to create thumbnails dir: {}", e))?;
+    fs::create_dir_all(previews_dir(library_root))
+        .map_err(|e| format!("Failed to create previews dir: {}", e))?;
 
     let config = LibraryConfig {
         name: name.to_string(),

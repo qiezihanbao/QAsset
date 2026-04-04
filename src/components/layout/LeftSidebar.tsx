@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react"
 import { Menu, Target, CheckSquare, Tags, Trash2, Box, Folder, Plus, ChevronRight, ChevronDown, Check, X } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
-import { useAssetStore, getSafeArray, type AssetLite } from "@/store/useAssetStore"
+import { useAssetStore, type ViewType } from "@/store/useAssetStore"
 import * as ContextMenu from '@radix-ui/react-context-menu'
 import { isMobile } from "@/lib/utils"
 
@@ -13,40 +13,208 @@ interface FolderInfo {
   show_subfolders: boolean
 }
 
+interface LibraryStats {
+  active_count: number
+  trashed_count: number
+  total_size: number
+}
+
+type ShortcutKey = 'all' | 'unorganized' | 'tags' | 'trash'
+
+interface ContextCheckboxMenuItemProps {
+  checked: boolean
+  onToggle: () => void
+  children: React.ReactNode
+  icon?: React.ReactNode
+}
+
+function ContextCheckboxMenuItem({ checked, onToggle, children, icon }: ContextCheckboxMenuItemProps) {
+  return (
+    <ContextMenu.CheckboxItem
+      checked={checked}
+      onCheckedChange={onToggle}
+      className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 pl-8 pr-2 relative select-none outline-none hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
+    >
+      <ContextMenu.ItemIndicator className="absolute left-2 inline-flex items-center justify-center">
+        <Check className="w-4 h-4" />
+      </ContextMenu.ItemIndicator>
+      <div className="flex items-center gap-2">
+        {icon}
+        <span>{children}</span>
+      </div>
+    </ContextMenu.CheckboxItem>
+  )
+}
+
 export function LeftSidebar() {
   const {
-    assets, setAssets, workspaces, setWorkspaces, activeWorkspaceId, activeView,
-    setActiveView, addWorkspace, toggleLeftSidebar, currentLibrary
+    assets, workspaces, setWorkspaces, activeWorkspaceId, activeView,
+    folderFilter, folderPreviewVisibility, setFolderPreviewVisibility,
+    addWorkspace, toggleLeftSidebar, currentLibrary, currentLibraryPath
   } = useAssetStore()
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [isAddingWorkspace, setIsAddingWorkspace] = useState(false)
   const [newWorkspaceName, setNewWorkspaceName] = useState("")
   const [showAllWorkspaces, setShowAllWorkspaces] = useState(false)
   const [folders, setFolders] = useState<FolderInfo[]>([])
+  const [workspaceCounts, setWorkspaceCounts] = useState<Record<string, number>>({})
+  const [libraryStats, setLibraryStats] = useState<LibraryStats>({
+    active_count: 0,
+    trashed_count: 0,
+    total_size: 0,
+  })
   const [visibleShortcuts, setVisibleShortcuts] = useState({
     all: true,
     unorganized: true,
     tags: true,
     trash: true
   })
+  const lastNonFolderSelectionRef = useRef<{ view: ViewType; workspaceId: string | null }>({
+    view: activeView,
+    workspaceId: activeWorkspaceId ?? null,
+  })
+  const normalizeFolderPath = useCallback((value: string | null | undefined) => {
+    return (value || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+  }, [])
+  const currentFolderNormalized = folderFilter && folderFilter.length > 0
+    ? normalizeFolderPath(folderFilter[0])
+    : null
+  const isFolderPreviewMode = !!currentFolderNormalized
+
+  useEffect(() => {
+    if (!currentFolderNormalized) {
+      lastNonFolderSelectionRef.current = {
+        view: activeView,
+        workspaceId: activeWorkspaceId ?? null,
+      }
+    }
+  }, [activeView, activeWorkspaceId, currentFolderNormalized])
+
+  const selectSidebarView = useCallback((view: ViewType, workspaceId: string | null = null) => {
+    useAssetStore.setState({
+      folderFilter: null,
+      similarAssetIds: null,
+      activeView: view,
+      activeWorkspaceId: workspaceId,
+    })
+  }, [])
+
+  const openFolderPreview = useCallback((folderPath: string) => {
+    const normalizedPath = normalizeFolderPath(folderPath)
+    if (!normalizedPath) return
+
+    const state = useAssetStore.getState()
+    const hasFolderPreview = !!(state.folderFilter && state.folderFilter.length > 0)
+    if (!hasFolderPreview) {
+      lastNonFolderSelectionRef.current = {
+        view: state.activeView,
+        workspaceId: state.activeWorkspaceId ?? null,
+      }
+    }
+
+    useAssetStore.setState({
+      folderFilter: [normalizedPath],
+      similarAssetIds: null,
+      activeView: 'all',
+      activeWorkspaceId: null,
+    })
+    window.dispatchEvent(new Event('quickasset:refresh-assets'))
+  }, [normalizeFolderPath])
+
+  const closeFolderPreviewToParent = useCallback((parentPath: string | null | undefined) => {
+    const normalizedParentPath = normalizeFolderPath(parentPath)
+    if (normalizedParentPath) {
+      useAssetStore.setState({
+        folderFilter: [normalizedParentPath],
+        similarAssetIds: null,
+        activeView: 'all',
+        activeWorkspaceId: null,
+      })
+      window.dispatchEvent(new Event('quickasset:refresh-assets'))
+      return
+    }
+
+    const { view, workspaceId } = lastNonFolderSelectionRef.current
+    useAssetStore.setState({
+      folderFilter: null,
+      similarAssetIds: null,
+      activeView: view,
+      activeWorkspaceId: view === 'workspace' ? workspaceId : null,
+    })
+    window.dispatchEvent(new Event('quickasset:refresh-assets'))
+  }, [normalizeFolderPath])
 
   // Load workspaces from backend on mount
   useEffect(() => {
-    if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
-      invoke('get_workspaces').then((ws: any) => {
-        setWorkspaces(ws.map((w: any) => ({ id: w.id, name: w.name })))
-      }).catch((e) => console.warn('Failed to load workspaces:', e))
+    if (!(window.__TAURI_INTERNALS__ || window.__TAURI__)) return
+    if (!currentLibraryPath) {
+      setWorkspaces([])
+      return
     }
-  }, [currentLibrary])
+    invoke('get_workspaces').then((ws: any) => {
+      setWorkspaces(ws.map((w: any) => ({ id: w.id, name: w.name })))
+    }).catch((e) => console.warn('Failed to load workspaces:', e))
+  }, [currentLibraryPath, setWorkspaces])
 
   // Load folders from backend via get_folders API
   const loadFolders = useCallback(() => {
-    if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
-      invoke<FolderInfo[]>('get_folders').then((f) => {
-        setFolders(f)
-      }).catch((e) => console.warn('Failed to load folders:', e))
+    if (!(window.__TAURI_INTERNALS__ || window.__TAURI__)) return
+    if (!currentLibraryPath) {
+      setFolders([])
+      return
     }
-  }, [])
+    invoke<FolderInfo[]>('get_folders').then((f) => {
+      setFolders(f)
+    }).catch((e) => console.warn('Failed to load folders:', e))
+  }, [currentLibraryPath])
+
+  const loadWorkspaceCounts = useCallback(async () => {
+    if (!(window.__TAURI_INTERNALS__ || window.__TAURI__)) return
+    if (!currentLibraryPath || workspaces.length === 0) {
+      setWorkspaceCounts({})
+      return
+    }
+
+    try {
+      const countPairs = await Promise.all(
+        workspaces.map(async (ws) => {
+          const result = await invoke<any>('query_assets', {
+            filters: {
+              workspace_id: ws.id,
+              is_trashed: false,
+              sort_field: 'created_at',
+              sort_order: 'desc',
+              page: 1,
+              page_size: 1,
+            }
+          })
+          return [ws.id, Number(result?.total_count || 0)] as const
+        })
+      )
+      setWorkspaceCounts(Object.fromEntries(countPairs))
+    } catch (e) {
+      console.warn('Failed to load workspace counts:', e)
+    }
+  }, [currentLibraryPath, workspaces])
+
+  const loadLibraryStats = useCallback(async () => {
+    if (!(window.__TAURI_INTERNALS__ || window.__TAURI__)) return
+    if (!currentLibraryPath) {
+      setLibraryStats({ active_count: 0, trashed_count: 0, total_size: 0 })
+      return
+    }
+
+    try {
+      const stats = await invoke<LibraryStats>('get_library_stats')
+      setLibraryStats({
+        active_count: Number(stats?.active_count || 0),
+        trashed_count: Number(stats?.trashed_count || 0),
+        total_size: Number(stats?.total_size || 0),
+      })
+    } catch (e) {
+      console.warn('Failed to load library stats:', e)
+    }
+  }, [currentLibraryPath])
 
   useEffect(() => {
     loadFolders()
@@ -54,10 +222,29 @@ export function LeftSidebar() {
 
   // Reload folders when assets change (e.g. after scan)
   useEffect(() => {
+    if (!currentLibraryPath) return
     loadFolders()
-  }, [assets.length, loadFolders])
+  }, [assets.length, loadFolders, currentLibraryPath])
 
-  const handleToggleShortcut = (key: keyof typeof visibleShortcuts) => {
+  useEffect(() => {
+    loadWorkspaceCounts()
+  }, [loadWorkspaceCounts, assets.length])
+
+  useEffect(() => {
+    loadLibraryStats()
+  }, [loadLibraryStats, assets.length])
+
+  useEffect(() => {
+    const onAssetsRefresh = () => {
+      loadFolders()
+      loadWorkspaceCounts()
+      loadLibraryStats()
+    }
+    window.addEventListener('quickasset:refresh-assets', onAssetsRefresh)
+    return () => window.removeEventListener('quickasset:refresh-assets', onAssetsRefresh)
+  }, [loadFolders, loadWorkspaceCounts, loadLibraryStats])
+
+  const handleToggleShortcut = (key: ShortcutKey) => {
     setVisibleShortcuts(prev => ({ ...prev, [key]: !prev[key] }))
   }
 
@@ -65,11 +252,18 @@ export function LeftSidebar() {
     setVisibleShortcuts({ all: true, unorganized: true, tags: true, trash: true })
   }
 
-  const renderNavContextMenu = (children: React.ReactNode, key: keyof typeof visibleShortcuts) => {
+  const renderNavContextMenu = (children: React.ReactNode, key: ShortcutKey) => {
+    const shortcutItems: Array<{ key: ShortcutKey; label: string }> = [
+      { key: 'all', label: '全部文件' },
+      { key: 'unorganized', label: '待整理文件' },
+      { key: 'tags', label: '全部标签' },
+      { key: 'trash', label: '废纸篓' },
+    ]
+
     return (
       <ContextMenu.Root>
         <ContextMenu.Trigger>
-          {children}
+          <div className="w-full">{children}</div>
         </ContextMenu.Trigger>
         <ContextMenu.Portal>
           <ContextMenu.Content
@@ -93,46 +287,15 @@ export function LeftSidebar() {
                   sideOffset={2}
                   alignOffset={-5}
                 >
-                  <ContextMenu.CheckboxItem
-                    checked={visibleShortcuts.all}
-                    onCheckedChange={() => handleToggleShortcut('all')}
-                    className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 pl-8 pr-2 relative select-none outline-none hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
-                  >
-                    <ContextMenu.ItemIndicator className="absolute left-2 inline-flex items-center justify-center">
-                      <Check className="w-4 h-4" />
-                    </ContextMenu.ItemIndicator>
-                    全部文件
-                  </ContextMenu.CheckboxItem>
-                  <ContextMenu.CheckboxItem
-                    checked={visibleShortcuts.unorganized}
-                    onCheckedChange={() => handleToggleShortcut('unorganized')}
-                    className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 pl-8 pr-2 relative select-none outline-none hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
-                  >
-                    <ContextMenu.ItemIndicator className="absolute left-2 inline-flex items-center justify-center">
-                      <Check className="w-4 h-4" />
-                    </ContextMenu.ItemIndicator>
-                    待整理文件
-                  </ContextMenu.CheckboxItem>
-                  <ContextMenu.CheckboxItem
-                    checked={visibleShortcuts.tags}
-                    onCheckedChange={() => handleToggleShortcut('tags')}
-                    className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 pl-8 pr-2 relative select-none outline-none hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
-                  >
-                    <ContextMenu.ItemIndicator className="absolute left-2 inline-flex items-center justify-center">
-                      <Check className="w-4 h-4" />
-                    </ContextMenu.ItemIndicator>
-                    全部标签
-                  </ContextMenu.CheckboxItem>
-                  <ContextMenu.CheckboxItem
-                    checked={visibleShortcuts.trash}
-                    onCheckedChange={() => handleToggleShortcut('trash')}
-                    className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 pl-8 pr-2 relative select-none outline-none hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
-                  >
-                    <ContextMenu.ItemIndicator className="absolute left-2 inline-flex items-center justify-center">
-                      <Check className="w-4 h-4" />
-                    </ContextMenu.ItemIndicator>
-                    废纸篓
-                  </ContextMenu.CheckboxItem>
+                  {shortcutItems.map(item => (
+                    <ContextCheckboxMenuItem
+                      key={item.key}
+                      checked={visibleShortcuts[item.key]}
+                      onToggle={() => handleToggleShortcut(item.key)}
+                    >
+                      {item.label}
+                    </ContextCheckboxMenuItem>
+                  ))}
                 </ContextMenu.SubContent>
               </ContextMenu.Portal>
             </ContextMenu.Sub>
@@ -163,7 +326,14 @@ export function LeftSidebar() {
   // Generate Folder Tree from get_folders API
   const renderFolderTree = () => {
     // Build hierarchical tree from flat folder list
-    type TreeNode = { path: string; display_name: string; asset_count: number; show_subfolders: boolean; children: TreeNode[] }
+    type TreeNode = {
+      path: string
+      parent_path: string | null
+      display_name: string
+      asset_count: number
+      show_subfolders: boolean
+      children: TreeNode[]
+    }
     const nodeMap = new Map<string, TreeNode>()
     const rootNodes: TreeNode[] = []
 
@@ -171,6 +341,7 @@ export function LeftSidebar() {
     for (const f of folders) {
       nodeMap.set(f.path, {
         path: f.path,
+        parent_path: f.parent_path,
         display_name: f.display_name,
         asset_count: f.asset_count,
         show_subfolders: f.show_subfolders,
@@ -182,28 +353,38 @@ export function LeftSidebar() {
     for (const f of folders) {
       const node = nodeMap.get(f.path)!
       const parentPath = f.parent_path
-      if (parentPath && nodeMap.has(parentPath)) {
+      if (parentPath !== null && parentPath !== f.path && nodeMap.has(parentPath)) {
         nodeMap.get(parentPath)!.children.push(node)
       } else {
         rootNodes.push(node)
       }
     }
 
+    const sortTree = (nodes: TreeNode[]) => {
+      nodes.sort((a, b) => a.display_name.localeCompare(b.display_name, undefined, { sensitivity: 'base' }))
+      for (const n of nodes) {
+        if (n.children.length > 0) {
+          sortTree(n.children)
+        }
+      }
+    }
+    sortTree(rootNodes)
+
     // Recursive component to render tree
     const FolderNodeComponent = ({ node, level = 0 }: { node: TreeNode; level?: number }) => {
       const [isExpanded, setIsExpanded] = useState(true)
-      const { folderFilter, setFolderFilter } = useAssetStore()
       const hasChildren = node.children.length > 0
 
-      const isSelected = folderFilter?.includes(node.path)
+      const normalizedNodePath = normalizeFolderPath(node.path)
+      const isSelected = currentFolderNormalized === normalizedNodePath
+      const isFolderCardsVisible = folderPreviewVisibility[normalizedNodePath] ?? true
 
       const handleFolderClick = (e: React.MouseEvent) => {
         e.stopPropagation()
         if (isSelected) {
-          setFolderFilter(null)
+          closeFolderPreviewToParent(node.parent_path)
         } else {
-          setFolderFilter([node.path])
-          useAssetStore.getState().setActiveView('all')
+          openFolderPreview(node.path)
         }
       }
 
@@ -213,11 +394,14 @@ export function LeftSidebar() {
           await invoke('update_folder_show_subfolders', {
             folderPath: node.path,
             showSubfolders: newVal,
+            folder_path: node.path,
+            show_subfolders: newVal,
           })
           // Update local state
           setFolders(prev => prev.map(f =>
             f.path === node.path ? { ...f, show_subfolders: newVal } : f
           ))
+          window.dispatchEvent(new Event('quickasset:refresh-assets'))
         } catch (e) {
           console.error('Failed to toggle show_subfolders:', e)
         }
@@ -261,16 +445,21 @@ export function LeftSidebar() {
               <ContextMenu.Content
                 className="min-w-[180px] bg-white dark:bg-zinc-900 rounded-md overflow-hidden p-1 shadow-[0px_10px_38px_-10px_rgba(22,_23,_24,_0.35),_0px_10px_20px_-15px_rgba(22,_23,_24,_0.2)] border border-zinc-200 dark:border-zinc-800 animate-in fade-in-80 z-50"
               >
-                <ContextMenu.CheckboxItem
-                  checked={node.show_subfolders}
-                  onCheckedChange={(checked) => handleToggleShowSubfolders(checked === true)}
-                  className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 pl-8 pr-2 relative select-none outline-none hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
+                <ContextCheckboxMenuItem
+                  checked={isFolderCardsVisible}
+                  onToggle={() => setFolderPreviewVisibility(normalizedNodePath, !isFolderCardsVisible)}
+                  icon={<Folder className="w-3.5 h-3.5 opacity-70" />}
                 >
-                  <ContextMenu.ItemIndicator className="absolute left-2 inline-flex items-center justify-center">
-                    <Check className="w-4 h-4" />
-                  </ContextMenu.ItemIndicator>
+                  显示文件夹预览
+                </ContextCheckboxMenuItem>
+                <ContextMenu.Separator className="h-px bg-zinc-200 dark:bg-zinc-800 m-1" />
+                <ContextCheckboxMenuItem
+                  checked={node.show_subfolders}
+                  onToggle={() => handleToggleShowSubfolders(!node.show_subfolders)}
+                  icon={<Folder className="w-3.5 h-3.5 opacity-70" />}
+                >
                   显示子文件夹内容
-                </ContextMenu.CheckboxItem>
+                </ContextCheckboxMenuItem>
               </ContextMenu.Content>
             </ContextMenu.Portal>
           </ContextMenu.Root>
@@ -336,6 +525,7 @@ export function LeftSidebar() {
       try {
         const result = await invoke('create_workspace', { name }) as any
         setWorkspaces([...workspaces, { id: result.id, name: result.name }])
+        setWorkspaceCounts(prev => ({ ...prev, [result.id]: 0 }))
       } catch (e) {
         console.error('Failed to create workspace:', e)
       }
@@ -349,8 +539,13 @@ export function LeftSidebar() {
       try {
         await invoke('delete_workspace', { id: wsId })
         setWorkspaces(workspaces.filter(w => w.id !== wsId))
+        setWorkspaceCounts(prev => {
+          const next = { ...prev }
+          delete next[wsId]
+          return next
+        })
         if (activeWorkspaceId === wsId) {
-          setActiveView('all')
+          selectSidebarView('all')
         }
       } catch (e) {
         console.error('Failed to delete workspace:', e)
@@ -359,7 +554,7 @@ export function LeftSidebar() {
       const newWorkspaces = workspaces.filter(w => w.id !== wsId)
       useAssetStore.setState({ workspaces: newWorkspaces })
       if (activeWorkspaceId === wsId) {
-        setActiveView('all')
+        selectSidebarView('all')
       }
     }
   }
@@ -422,13 +617,13 @@ export function LeftSidebar() {
         <div className="flex flex-col text-xs text-zinc-500 gap-1 mt-2">
           <div className="flex items-center justify-between">
             <span>本地资产总计</span>
-            <span className="font-medium">{assets.length} 项</span>
+            <span className="font-medium">{libraryStats.active_count} 项</span>
           </div>
           <div className="flex items-center justify-between">
             <span>占用空间</span>
             <span className="font-medium">
-              {assets.length > 0
-                ? (assets.reduce((sum, asset) => sum + asset.size, 0) / (1024 * 1024)).toFixed(2) + " MB"
+              {libraryStats.total_size > 0
+                ? (libraryStats.total_size / (1024 * 1024)).toFixed(2) + " MB"
                 : "0 MB"}
             </span>
           </div>
@@ -439,19 +634,19 @@ export function LeftSidebar() {
         {/* Main Navigation */}
         <nav className="space-y-0.5 mb-6">
           {visibleShortcuts.all && renderNavContextMenu(
-            <NavItem id="nav-all" icon={<Box />} label="全部文件" count={assets.filter(a => !a.is_trashed).length} active={activeView === 'all'} onClick={() => setActiveView('all')} />,
+            <NavItem id="nav-all" icon={<Box />} label="全部文件" count={libraryStats.active_count} active={!isFolderPreviewMode && activeView === 'all'} onClick={() => selectSidebarView('all')} />,
             'all'
           )}
           {visibleShortcuts.unorganized && renderNavContextMenu(
-            <NavItem id="nav-unorganized" icon={<CheckSquare />} label="待整理文件" count={0} active={activeView === 'unorganized'} onClick={() => setActiveView('unorganized')} />,
+            <NavItem id="nav-unorganized" icon={<CheckSquare />} label="待整理文件" count={0} active={!isFolderPreviewMode && activeView === 'unorganized'} onClick={() => selectSidebarView('unorganized')} />,
             'unorganized'
           )}
           {visibleShortcuts.tags && renderNavContextMenu(
-            <NavItem id="nav-tags" icon={<Tags />} label="全部标签" active={activeView === 'tags'} onClick={() => setActiveView('tags')} />,
+            <NavItem id="nav-tags" icon={<Tags />} label="全部标签" active={!isFolderPreviewMode && activeView === 'tags'} onClick={() => selectSidebarView('tags')} />,
             'tags'
           )}
           {visibleShortcuts.trash && renderNavContextMenu(
-            <NavItem id="nav-trash" icon={<Trash2 />} label="废纸篓" count={assets.filter(a => a.is_trashed).length} active={activeView === 'trash'} onClick={() => setActiveView('trash')} />,
+            <NavItem id="nav-trash" icon={<Trash2 />} label="废纸篓" count={libraryStats.trashed_count} active={!isFolderPreviewMode && activeView === 'trash'} onClick={() => selectSidebarView('trash')} />,
             'trash'
           )}
 
@@ -498,13 +693,15 @@ export function LeftSidebar() {
             return (
               <ContextMenu.Root key={ws.id}>
                 <ContextMenu.Trigger>
-                  <NavItem
-                    icon={<Box />}
-                    label={ws.name}
-                    count={0}
-                    active={activeView === 'workspace' && activeWorkspaceId === ws.id}
-                    onClick={() => setActiveView('workspace', ws.id)}
-                  />
+                  <div className="w-full">
+                    <NavItem
+                      icon={<Box />}
+                      label={ws.name}
+                      count={workspaceCounts[ws.id] ?? 0}
+                      active={!isFolderPreviewMode && activeView === 'workspace' && activeWorkspaceId === ws.id}
+                      onClick={() => selectSidebarView('workspace', ws.id)}
+                    />
+                  </div>
                 </ContextMenu.Trigger>
                 <ContextMenu.Portal>
                   <ContextMenu.Content

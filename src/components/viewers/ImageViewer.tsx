@@ -1,5 +1,5 @@
 // src/components/viewers/ImageViewer.tsx
-import { useState, useCallback, useRef } from "react"
+import { useState, useCallback, useRef, useEffect } from "react"
 import { convertFileSrc } from "@tauri-apps/api/core"
 
 const MIN_ZOOM = 0.5
@@ -9,12 +9,22 @@ const WHEEL_ZOOM_FACTOR = 0.001
 
 interface ImageViewerProps {
   filePath: string
+  fileName?: string
+  thumbnailPath?: string
   thumbnailBase64?: string
+  preferThumbnail?: boolean
   zoom: number
   onZoomChange: (zoom: number) => void
 }
 
-export function ImageViewer({ filePath, thumbnailBase64, zoom, onZoomChange }: ImageViewerProps) {
+const THUMBNAIL_FIRST_EXTENSIONS = new Set(['psd', 'psb', 'clip'])
+
+function getFileExt(fileNameOrPath: string): string {
+  if (!fileNameOrPath.includes('.')) return ''
+  return fileNameOrPath.split('.').pop()!.toLowerCase()
+}
+
+export function ImageViewer({ filePath, fileName, thumbnailPath, thumbnailBase64, preferThumbnail, zoom, onZoomChange }: ImageViewerProps) {
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [isDragging, setIsDragging] = useState(false)
   const [imgError, setImgError] = useState(false)
@@ -22,10 +32,20 @@ export function ImageViewer({ filePath, thumbnailBase64, zoom, onZoomChange }: I
   const panStart = useRef({ x: 0, y: 0 })
 
   const isTauri = !!(window.__TAURI_INTERNALS__ || window.__TAURI__)
+  const ext = getFileExt(fileName || filePath)
+  const shouldPreferThumbnail = preferThumbnail ?? THUMBNAIL_FIRST_EXTENSIONS.has(ext)
+
+  useEffect(() => {
+    setImgError(false)
+  }, [filePath, thumbnailPath])
 
   let imageSrc: string | null = null
-  if (!imgError && isTauri) {
-    imageSrc = convertFileSrc(filePath)
+  if (isTauri) {
+    const directSrc = convertFileSrc(filePath)
+    const thumbSrc = thumbnailPath ? convertFileSrc(thumbnailPath) : null
+    const primarySrc = shouldPreferThumbnail && thumbSrc ? thumbSrc : directSrc
+    const secondarySrc = shouldPreferThumbnail && thumbSrc ? directSrc : thumbSrc
+    imageSrc = imgError ? secondarySrc : primarySrc
   } else if (thumbnailBase64) {
     imageSrc = thumbnailBase64
   }

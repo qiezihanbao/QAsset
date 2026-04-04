@@ -14,6 +14,7 @@ pub struct AssetInfoLite {
     pub modified_at: u64,
     pub rating: Option<u8>,
     pub is_trashed: bool,
+    pub thumbnail_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

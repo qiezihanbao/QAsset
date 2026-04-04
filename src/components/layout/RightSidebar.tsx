@@ -6,6 +6,7 @@ import { isMobile } from "@/lib/utils"
 import type { AssetDetail } from "@/store/useAssetStore"
 
 const hasTauriRuntime = () => Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__)
+const notifyAssetsRefresh = () => window.dispatchEvent(new Event('quickasset:refresh-assets'))
 
 export function RightSidebar() {
   const {
@@ -84,6 +85,7 @@ export function RightSidebar() {
     try {
       await safeInvoke("update_asset", {
         id: selectedAsset.id,
+        sourceUrl: sourceUrlInput || null,
         source_url: sourceUrlInput || null,
       })
       // Refresh detail
@@ -136,6 +138,7 @@ export function RightSidebar() {
           })
           setAssetDetail({ ...detail, tags: newTagsStr })
           useAssetStore.getState().refreshTagsSummary()
+          notifyAssetsRefresh()
         } catch (err) {
           console.error("Failed to update tags:", err)
         }
@@ -156,6 +159,7 @@ export function RightSidebar() {
       })
       setAssetDetail({ ...detail, tags: newTagsStr })
       useAssetStore.getState().refreshTagsSummary()
+      notifyAssetsRefresh()
     } catch (err) {
       console.error("Failed to update tags:", err)
     }
@@ -164,14 +168,15 @@ export function RightSidebar() {
   const handleRemoveTag = async (tagToRemove: string) => {
     if (!detail) return
     const newTags = detailTags.filter((t: string) => t !== tagToRemove)
-    const newTagsStr = newTags.length > 0 ? JSON.stringify(newTags) : null
+    const newTagsStr = JSON.stringify(newTags)
     try {
       await safeInvoke("update_asset", {
         id: selectedAsset.id,
         tags: newTagsStr,
       })
-      setAssetDetail({ ...detail, tags: newTagsStr || undefined })
+      setAssetDetail({ ...detail, tags: newTagsStr })
       useAssetStore.getState().refreshTagsSummary()
+      notifyAssetsRefresh()
     } catch (error) {
       console.error("Failed to update tags:", error)
     }
@@ -187,14 +192,16 @@ export function RightSidebar() {
       newWsIds = [...detailWorkspaceIds, workspaceId]
     }
 
-    const newWsIdsStr = newWsIds.length > 0 ? JSON.stringify(newWsIds) : undefined
+    const newWsIdsStr = JSON.stringify(newWsIds)
 
     try {
       await safeInvoke("update_asset", {
         id: selectedAsset.id,
-        workspace_ids: newWsIdsStr || null,
+        workspaceIds: newWsIdsStr,
+        workspace_ids: newWsIdsStr,
       })
       setAssetDetail({ ...detail, workspace_ids: newWsIdsStr })
+      notifyAssetsRefresh()
     } catch (err) {
       console.error("Failed to update workspaces:", err)
     }
@@ -408,7 +415,11 @@ export function RightSidebar() {
               </div>
               <div className="flex justify-between">
                 <span className="text-zinc-500">尺寸</span>
-                <span className="text-zinc-700 dark:text-zinc-300">{selectedAsset.width && selectedAsset.height ? `${selectedAsset.width}x${selectedAsset.height}` : '-'}</span>
+                <span className="text-zinc-700 dark:text-zinc-300">
+                  {(detail?.width && detail?.height)
+                    ? `${detail.width}x${detail.height}`
+                    : (selectedAsset.width && selectedAsset.height ? `${selectedAsset.width}x${selectedAsset.height}` : '-')}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-zinc-500">文件类型</span>

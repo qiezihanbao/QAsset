@@ -1,6 +1,7 @@
 import { useEffect, useCallback, useState, useRef } from "react"
-import { motion, AnimatePresence } from "framer-motion"
+import { motion } from "framer-motion"
 import { X, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, RotateCcw } from "lucide-react"
+import { invoke } from "@tauri-apps/api/core"
 import { useAssetStore } from "@/store/useAssetStore"
 import { getViewerType } from "@/components/viewers/getViewerType"
 import { ImageViewer, MIN_ZOOM, MAX_ZOOM, ZOOM_STEP, WHEEL_ZOOM_FACTOR } from "@/components/viewers/ImageViewer"
@@ -10,11 +11,30 @@ import { MarkdownViewer } from "@/components/viewers/MarkdownViewer"
 import { VideoViewer } from "@/components/viewers/VideoViewer"
 import { UnsupportedViewer } from "@/components/viewers/UnsupportedViewer"
 
+const THUMBNAIL_FIRST_EXTENSIONS = new Set(['psd', 'psb', 'clip'])
+
+function getFileExt(fileName: string): string {
+  if (!fileName.includes('.')) return ''
+  return fileName.split('.').pop()!.toLowerCase()
+}
+
 export function Lightbox() {
-  const { previewAsset, setPreviewAsset, isFullscreenPreview, setFullscreenPreview, assets } = useAssetStore()
+  const {
+    previewAsset,
+    setPreviewAsset,
+    isFullscreenPreview,
+    setFullscreenPreview,
+    assets,
+    updateAssetProperty,
+    assetDetail,
+    setAssetDetail,
+  } = useAssetStore()
 
   const [zoom, setZoom] = useState(1)
+  const [fullPreviewPath, setFullPreviewPath] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const previewFetchInFlightRef = useRef<string | null>(null)
+  const openedAtRef = useRef(0)
 
   const resetTransform = useCallback(() => {
     setZoom(1)
@@ -24,6 +44,80 @@ export function Lightbox() {
   useEffect(() => {
     resetTransform()
   }, [previewAsset?.id, resetTransform])
+
+  useEffect(() => {
+    if (!isFullscreenPreview) {
+      setFullPreviewPath(null)
+      previewFetchInFlightRef.current = null
+      return
+    }
+    openedAtRef.current = Date.now()
+    setFullPreviewPath(null)
+    previewFetchInFlightRef.current = null
+  }, [previewAsset?.id, isFullscreenPreview])
+
+  const handleBackdropClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    // Close only when clicking directly on backdrop, and ignore the first
+    // short window after opening to avoid double-click open->immediate-close.
+    if (e.target !== e.currentTarget) return
+    if (Date.now() - openedAtRef.current < 220) return
+    setFullscreenPreview(false)
+  }, [setFullscreenPreview])
+
+  // For PSD/CLIP: ensure we have thumbnail_path in fullscreen preview.
+  useEffect(() => {
+    if (!previewAsset || !isFullscreenPreview) return
+    const ext = getFileExt(previewAsset.name)
+    const needsTranscodedPreview = THUMBNAIL_FIRST_EXTENSIONS.has(ext)
+    if (!needsTranscodedPreview) return
+    if (fullPreviewPath) return
+    if (previewFetchInFlightRef.current === previewAsset.id) return
+
+    previewFetchInFlightRef.current = previewAsset.id
+    invoke<string | null>('ensure_asset_full_preview', { id: previewAsset.id })
+      .then((previewPath) => {
+        if (previewPath) {
+          setFullPreviewPath(previewPath)
+          // Sync up-to-date dimensions after backend preview generation/cache hit.
+          void invoke<{ width?: number; height?: number; thumbnail_path?: string }>('get_asset_detail', { id: previewAsset.id })
+            .then((detail) => {
+              const nextWidth = detail?.width
+              const nextHeight = detail?.height
+              if (nextWidth && nextHeight) {
+                updateAssetProperty(previewAsset.id, { width: nextWidth, height: nextHeight })
+                if (assetDetail?.id === previewAsset.id) {
+                  setAssetDetail({ ...assetDetail, width: nextWidth, height: nextHeight })
+                }
+              }
+            })
+            .catch(() => {})
+          return
+        }
+
+        // Fallback chain: try thumbnail, then detail.
+        return invoke<string | null>('ensure_asset_thumbnail', { id: previewAsset.id })
+          .then((thumbnailPath) => {
+            if (thumbnailPath) {
+              setPreviewAsset({ ...previewAsset, thumbnail_path: thumbnailPath }, true)
+              return
+            }
+            return invoke<{ thumbnail_path?: string }>('get_asset_detail', { id: previewAsset.id })
+          })
+          .then((detail) => {
+            if (detail?.thumbnail_path) {
+              setPreviewAsset({ ...previewAsset, thumbnail_path: detail.thumbnail_path }, true)
+            }
+          })
+      })
+      .catch((err) => {
+        console.warn('Failed to fetch thumbnail path for preview:', err)
+      })
+      .finally(() => {
+        if (previewFetchInFlightRef.current === previewAsset.id) {
+          previewFetchInFlightRef.current = null
+        }
+      })
+  }, [previewAsset, isFullscreenPreview, setPreviewAsset, fullPreviewPath, updateAssetProperty, assetDetail, setAssetDetail])
 
   const navigate = useCallback((direction: number) => {
     if (!previewAsset) return
@@ -93,13 +187,18 @@ export function Lightbox() {
 
   const currentIndex = assets.findIndex(a => a.id === previewAsset.id)
   const zoomPercent = Math.round(zoom * 100)
+  const previewExt = getFileExt(previewAsset.name)
+  const shouldPreferThumbnail = THUMBNAIL_FIRST_EXTENSIONS.has(previewExt) && !fullPreviewPath
 
   const renderViewer = () => {
     switch (viewerType) {
       case 'image':
         return (
           <ImageViewer
-            filePath={previewAsset.path}
+            filePath={fullPreviewPath || previewAsset.path}
+            fileName={previewAsset.name}
+            thumbnailPath={previewAsset.thumbnail_path}
+            preferThumbnail={shouldPreferThumbnail}
             zoom={zoom}
             onZoomChange={setZoom}
           />
@@ -125,15 +224,13 @@ export function Lightbox() {
   }
 
   return (
-    <AnimatePresence>
-      <motion.div
-        ref={containerRef}
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        className="absolute inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm select-none"
-        onClick={() => setFullscreenPreview(false)}
-      >
+    <motion.div
+      ref={containerRef}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      className="absolute inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm select-none"
+      onClick={handleBackdropClick}
+    >
         {/* Top Bar */}
         <div
           className="absolute top-0 left-0 right-0 z-10 p-3 flex items-center justify-between text-white/70 bg-gradient-to-b from-black/50 to-transparent"
@@ -193,17 +290,16 @@ export function Lightbox() {
         </button>
 
         {/* Content - Viewer Component */}
-        <motion.div
-          key={previewAsset.id}
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          exit={{ opacity: 0, scale: 0.95 }}
-          transition={{ type: "spring", damping: 25, stiffness: 300 }}
-          className="w-full h-full pt-12 pb-4 px-12 overflow-hidden"
-          onClick={(e) => e.stopPropagation()}
-        >
+      <motion.div
+        key={previewAsset.id}
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ type: "spring", damping: 25, stiffness: 300 }}
+        className="w-full h-full pt-12 pb-4 px-12 overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
           {renderViewer()}
-        </motion.div>
+      </motion.div>
 
         {/* Bottom hint */}
         {isImageViewer && zoom <= 1 && (
@@ -216,7 +312,6 @@ export function Lightbox() {
             方向键切换 · ESC 关闭
           </div>
         )}
-      </motion.div>
-    </AnimatePresence>
+    </motion.div>
   )
 }

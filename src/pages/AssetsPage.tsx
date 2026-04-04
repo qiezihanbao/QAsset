@@ -1,4 +1,4 @@
-import { Image as ImageIcon, FileText, Video, Box, ChevronLeft, ChevronRight, Filter, Grid, List, Search, ChevronDown, Columns, FolderOpen, Trash2, Copy, Edit2, MoveRight, PlusCircle, Tag, Image, Link, Star, HardDrive, Maximize2 } from "lucide-react"
+import { Image as ImageIcon, FileText, Video, Box, ChevronLeft, ChevronRight, Filter, Grid, List, Search, ChevronDown, Columns, FolderOpen, Folder, Trash2, Copy, Edit2, MoveRight, PlusCircle, Tag, Image, Link, Star, HardDrive, Maximize2 } from "lucide-react"
 import { useAssetStore, AssetLite, AssetFilters } from "@/store/useAssetStore"
 import * as ContextMenu from '@radix-ui/react-context-menu'
 import { invoke } from "@tauri-apps/api/core"
@@ -8,6 +8,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { useRef, useMemo, useEffect, useState, useCallback } from 'react'
 import Selecto from "react-selecto"
 import { ColorWheelPicker } from "@/components/ColorWheelPicker"
+import { WorkspaceCanvasView } from "@/components/workspace/WorkspaceCanvasView"
 
 const safeInvoke = async (command: string, args?: any) => {
   if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
@@ -17,6 +18,30 @@ const safeInvoke = async (command: string, args?: any) => {
 }
 
 const isTauri = () => !!(window.__TAURI_INTERNALS__ || window.__TAURI__)
+const THUMBNAIL_FIRST_EXTENSIONS = new Set(['psd', 'psb', 'clip'])
+
+function getFileExt(fileNameOrPath: string): string {
+  if (!fileNameOrPath.includes('.')) return ''
+  return fileNameOrPath.split('.').pop()!.toLowerCase()
+}
+
+function getCardImageSrc(asset: AssetLite, overrideThumbnailPath?: string | null): string | null {
+  if (!isTauri()) return null
+  const thumbnailPath = overrideThumbnailPath ?? asset.thumbnail_path
+  if (asset.asset_type === 'video') {
+    return thumbnailPath ? convertFileSrc(thumbnailPath) : null
+  }
+  const ext = getFileExt(asset.name || asset.path)
+  const preferThumbnail = THUMBNAIL_FIRST_EXTENSIONS.has(ext)
+  const filePath = preferThumbnail ? (thumbnailPath || asset.path) : asset.path
+  return filePath ? convertFileSrc(filePath) : null
+}
+
+function getFolderPreviewSrc(folder: FolderInfo): string | null {
+  if (!isTauri()) return null
+  const filePath = folder.preview_thumbnail_path || folder.preview_asset_path
+  return filePath ? convertFileSrc(filePath) : null
+}
 
 // Simple color distance using euclidean distance in RGB space
 function hexToRgb(hex: string) {
@@ -55,6 +80,17 @@ const SHAPE_FILTER_OPTIONS = [
   { label: '长图', shape: 'panoramic' },
 ]
 
+interface FolderInfo {
+  path: string
+  parent_path: string | null
+  display_name: string
+  asset_count: number
+  show_subfolders: boolean
+  preview_thumbnail_path?: string | null
+  preview_asset_path?: string | null
+  preview_asset_type?: string | null
+}
+
 function getAssetColor(type: string) {
   switch (type) {
     case 'image': return 'bg-indigo-500 text-indigo-500'
@@ -73,7 +109,35 @@ function getAssetIcon(type: string) {
   }
 }
 
-function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, onSelect, onContextMenu, onPreview, onShowInFolder, onSearchSimilar, onDelete, onAssignWorkspace, activeView }: any) {
+function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, onSelect, onContextMenu, onPreview, onShowInFolder, onPreviewFolder, onSearchSimilar, onDelete, onAssignWorkspace, onQuickAddTag, activeView }: any) {
+  const [resolvedThumbnailPath, setResolvedThumbnailPath] = useState<string | null>(asset.thumbnail_path || null)
+
+  useEffect(() => {
+    setResolvedThumbnailPath(asset.thumbnail_path || null)
+  }, [asset.id, asset.thumbnail_path])
+
+  useEffect(() => {
+    if (!isTauri()) return
+    if (asset.asset_type !== 'video') return
+    if (resolvedThumbnailPath) return
+
+    let cancelled = false
+    safeInvoke("ensure_asset_thumbnail", { id: asset.id })
+      .then((thumbnailPath) => {
+        if (cancelled) return
+        if (typeof thumbnailPath === 'string' && thumbnailPath.length > 0) {
+          setResolvedThumbnailPath(thumbnailPath)
+        }
+      })
+      .catch((err) => {
+        console.warn("Failed to generate video thumbnail:", err)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [asset.id, asset.asset_type, resolvedThumbnailPath])
+
   const handleCopyPath = async (e: React.MouseEvent) => {
     e.stopPropagation()
     try {
@@ -107,9 +171,10 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
     }
   }
 
-  // Use convertFileSrc for disk-based images in Tauri
-  const imageSrc = isTauri() ? convertFileSrc(asset.path) : null
-  const isImage = asset.asset_type === 'image'
+  const ext = getFileExt(asset.name || asset.path)
+  const isImageAsset = asset.asset_type === 'image' || THUMBNAIL_FIRST_EXTENSIONS.has(ext)
+  const imageSrc = getCardImageSrc(asset, resolvedThumbnailPath)
+  const hasVisualPreview = !!imageSrc && (isImageAsset || asset.asset_type === 'video')
 
   return (
     <ContextMenu.Root>
@@ -117,7 +182,11 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
         <div
           data-id={asset.id}
           onClick={onSelect}
-          onDoubleClick={onPreview}
+          onDoubleClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            onPreview?.()
+          }}
           className={`selectable-asset group flex flex-col items-center cursor-pointer break-inside-avoid ${layoutMode === 'masonry' ? 'mb-8' : ''}`}
         >
           <div className={`relative w-full rounded-xl overflow-hidden transition-all duration-200 ${
@@ -125,10 +194,10 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
               ? "ring-2 ring-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.4)]"
               : "ring-1 ring-zinc-200 dark:ring-zinc-800 hover:ring-zinc-300 dark:hover:ring-zinc-700"
           }`}>
-            <div className={`w-full flex items-center justify-center ${!isImage ? getAssetColor(asset.asset_type) : ''} bg-zinc-100 dark:bg-zinc-900 bg-opacity-10 dark:bg-opacity-10`}>
-              {isImage ? (
+            <div className={`w-full flex items-center justify-center ${!hasVisualPreview ? getAssetColor(asset.asset_type) : ''} bg-zinc-100 dark:bg-zinc-900 bg-opacity-10 dark:bg-opacity-10`}>
+              {hasVisualPreview ? (
                 <img
-                  src={imageSrc || ''}
+                  src={imageSrc}
                   alt={asset.name}
                   loading="lazy"
                   decoding="async"
@@ -189,6 +258,13 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
           >
             <FolderOpen className="w-4 h-4 mr-2 opacity-70" />
             在文件夹中显示
+          </ContextMenu.Item>
+          <ContextMenu.Item
+            onClick={onPreviewFolder}
+            className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer"
+          >
+            <FolderOpen className="w-4 h-4 mr-2 opacity-70" />
+            显示所在文件夹预览
           </ContextMenu.Item>
 
           <ContextMenu.Separator className="h-[1px] bg-zinc-200 dark:bg-zinc-800 m-1" />
@@ -264,6 +340,7 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
 
           <ContextMenu.Separator className="h-[1px] bg-zinc-200 dark:bg-zinc-800 m-1" />
           <ContextMenu.Item
+            onClick={() => onQuickAddTag?.()}
             className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer justify-between"
           >
             <div className="flex items-center">
@@ -324,18 +401,46 @@ export function AssetsPage() {
   const {
     assets, setSelectedAssets, selectedAssets, searchQuery, setSearchQuery,
     colorFilter, setColorFilter, typeFilter, setTypeFilter, tagFilter, setTagFilter,
-    folderFilter,
+    folderFilter, folderPreviewVisibility, setFolderFilter,
     sizeFilter, setSizeFilter, ratingFilter, setRatingFilter,
     shapeFilter, setShapeFilter,
-    activeView, activeWorkspaceId, workspaces, thumbnailSize, setThumbnailSize, layoutMode, setLayoutMode,
+    activeView, activeWorkspaceId, setActiveView, workspaces, thumbnailSize, setThumbnailSize, layoutMode, setLayoutMode,
     sortConfig, setSortConfig, similarAssetIds, setSimilarAssetIds, setPreviewAsset,
-    removeAsset, updateAssetProperty, assetDetail, setAssets
+    removeAsset, updateAssetProperty, assetDetail, setAssets, setAssetDetail, currentLibraryPath,
+    tagsSummary, refreshTagsSummary
   } = useAssetStore()
 
   const [isColorPickerOpen, setIsColorPickerOpen] = useState(false)
+  const [isTagFilterOpen, setIsTagFilterOpen] = useState(false)
+  const [isTypeFilterOpen, setIsTypeFilterOpen] = useState(false)
   const [isSizeFilterOpen, setIsSizeFilterOpen] = useState(false)
   const [isRatingFilterOpen, setIsRatingFilterOpen] = useState(false)
   const [isShapeFilterOpen, setIsShapeFilterOpen] = useState(false)
+  const [isSortOpen, setIsSortOpen] = useState(false)
+  const [folders, setFolders] = useState<FolderInfo[]>([])
+  const [refreshVersion, setRefreshVersion] = useState(0)
+  const sortMenuRef = useRef<HTMLDivElement>(null)
+
+  const triggerRefresh = useCallback(() => {
+    setRefreshVersion(v => v + 1)
+  }, [])
+
+  useEffect(() => {
+    const onExternalRefresh = () => triggerRefresh()
+    window.addEventListener('quickasset:refresh-assets', onExternalRefresh)
+    return () => window.removeEventListener('quickasset:refresh-assets', onExternalRefresh)
+  }, [triggerRefresh])
+
+  useEffect(() => {
+    if (!isSortOpen) return
+    const handleClickOutside = (event: MouseEvent) => {
+      if (sortMenuRef.current && !sortMenuRef.current.contains(event.target as Node)) {
+        setIsSortOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [isSortOpen])
 
   // Virtualization Logic for Grid Mode
   const parentRef = useRef<HTMLDivElement>(null)
@@ -435,8 +540,10 @@ export function AssetsPage() {
       updateAssetProperty(id, { is_trashed: false })
       await safeInvoke("update_asset", {
         id,
+        isTrashed: false,
         is_trashed: false,
       })
+      triggerRefresh()
     } catch (err) {
       console.error("Failed to restore asset:", err)
     }
@@ -451,9 +558,11 @@ export function AssetsPage() {
         updateAssetProperty(id, { is_trashed: true })
         await safeInvoke("update_asset", {
           id,
+          isTrashed: true,
           is_trashed: true,
         })
       }
+      triggerRefresh()
     } catch (err) {
       console.error("Failed to delete asset:", err)
     }
@@ -481,26 +590,171 @@ export function AssetsPage() {
     }
   }
 
-  const allTags: string[] = []
+  const handlePreviewFolderFromAsset = (path: string) => {
+    if (!currentLibraryPath) return
+    const normalizedPath = path.replace(/\\/g, '/')
+    const normalizedRoot = currentLibraryPath.replace(/\\/g, '/').replace(/\/+$/, '')
+    if (!normalizedPath.startsWith(`${normalizedRoot}/`)) return
+
+    const relativePath = normalizedPath.slice(normalizedRoot.length + 1)
+    const lastSlash = relativePath.lastIndexOf('/')
+    if (lastSlash <= 0) return
+
+    const folder = relativePath.slice(0, lastSlash).replace(/^\/+|\/+$/g, '')
+    if (!folder) return
+    setFolderFilter([folder])
+    setActiveView('all')
+    setSimilarAssetIds(null)
+    triggerRefresh()
+  }
+
+  const handleQuickAddTag = async (id: string) => {
+    const input = window.prompt("输入标签（多个用逗号分隔）:")
+    if (!input) return
+
+    const newTags = Array.from(new Set(
+      input
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean)
+    ))
+    if (newTags.length === 0) return
+
+    try {
+      const detail = await safeInvoke("get_asset_detail", { id }) as any
+      const existingTags = detail?.tags
+        ? (() => {
+            try {
+              const parsed = JSON.parse(detail.tags)
+              return Array.isArray(parsed) ? parsed.filter((t: unknown) => typeof t === "string") : []
+            } catch {
+              return []
+            }
+          })()
+        : []
+      const merged = Array.from(new Set([...existingTags, ...newTags]))
+      const mergedTagsStr = JSON.stringify(merged)
+
+      await safeInvoke("update_asset", {
+        id,
+        tags: mergedTagsStr,
+      })
+
+      if (assetDetail?.id === id) {
+        setAssetDetail({ ...assetDetail, tags: mergedTagsStr })
+      }
+      useAssetStore.getState().refreshTagsSummary()
+      triggerRefresh()
+    } catch (err) {
+      console.error("Failed to quick add tags:", err)
+    }
+  }
+
+  const allTags = useMemo(
+    () => Object.keys(tagsSummary).sort((a, b) => (tagsSummary[b] || 0) - (tagsSummary[a] || 0)),
+    [tagsSummary]
+  )
+
+  useEffect(() => {
+    if (!currentLibraryPath) return
+    refreshTagsSummary()
+  }, [currentLibraryPath, refreshTagsSummary])
 
   const activeWorkspaceName = activeView === 'workspace' && activeWorkspaceId
     ? workspaces.find(w => w.id === activeWorkspaceId)?.name
     : activeView === 'trash' ? "废纸篓"
     : activeView === 'unorganized' ? "待整理文件"
     : "全部文件"
+  const isCanvasEnabled = activeView === 'workspace'
+  const currentFolderPath = folderFilter && folderFilter.length > 0 ? folderFilter[0] : null
+  const normalizedLibraryPath = (currentLibraryPath || 'no-library').replace(/\\/g, '/')
+  const canvasScope = currentFolderPath
+    ? `folder:${currentFolderPath}`
+    : activeView === 'workspace'
+      ? `workspace:${activeWorkspaceId || 'none'}`
+      : `view:${activeView}`
+  const canvasPersistenceKey = `${normalizedLibraryPath}::${canvasScope}`
+  const normalizeFolderPath = (value: string | null | undefined) =>
+    (value || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+
+  const currentFolderNormalized = currentFolderPath ? normalizeFolderPath(currentFolderPath) : null
+  const isCurrentFolderCardPreviewVisible = currentFolderNormalized
+    ? (folderPreviewVisibility[currentFolderNormalized] ?? true)
+    : false
+  const currentFolderInfo = useMemo(() => {
+    if (!currentFolderNormalized) return null
+    return folders.find((f) => normalizeFolderPath(f.path) === currentFolderNormalized) || null
+  }, [folders, currentFolderNormalized])
+
+  const childFolders = useMemo(() => {
+    if (!currentFolderNormalized) return []
+    return folders
+      .filter((f) => normalizeFolderPath(f.parent_path) === currentFolderNormalized)
+      .sort((a, b) => a.display_name.localeCompare(b.display_name, undefined, { sensitivity: 'base' }))
+  }, [folders, currentFolderNormalized])
+
+  const handleOpenFolderPreview = (folderPath: string) => {
+    const normalized = normalizeFolderPath(folderPath)
+    if (!normalized) return
+    setFolderFilter([normalized])
+    setActiveView('all')
+    setSimilarAssetIds(null)
+    triggerRefresh()
+  }
+
+  const handleOpenParentFolder = () => {
+    if (!currentFolderInfo) return
+    const parent = normalizeFolderPath(currentFolderInfo.parent_path)
+    if (!parent) {
+      setFolderFilter(null)
+    } else {
+      setFolderFilter([parent])
+    }
+    setActiveView('all')
+    setSimilarAssetIds(null)
+    triggerRefresh()
+  }
+
+  useEffect(() => {
+    if (layoutMode === 'canvas' && !isCanvasEnabled) {
+      setLayoutMode('masonry')
+    }
+  }, [layoutMode, isCanvasEnabled, setLayoutMode])
 
   useEffect(() => {
     if (!(window as any).__TAURI_INTERNALS__ && !(window as any).__TAURI__) return
+    if (!currentLibraryPath) {
+      setFolders([])
+      return
+    }
+    const loadFolders = async () => {
+      try {
+        const folderRows = await invoke<FolderInfo[]>('get_folders')
+        setFolders(folderRows)
+      } catch (e) {
+        console.error('Failed to load folders for preview:', e)
+      }
+    }
+    loadFolders()
+  }, [currentLibraryPath, refreshVersion])
 
+  useEffect(() => {
+    if (!(window as any).__TAURI_INTERNALS__ && !(window as any).__TAURI__) return
+    if (!currentLibraryPath) {
+      setAssets([])
+      return
+    }
+
+    const hasFolderPreview = !!(folderFilter && folderFilter.length > 0)
     const filters: Partial<AssetFilters> & { page: number; page_size: number } = {
       sort_field: sortConfig.field,
       sort_order: sortConfig.order,
       page: 1,
       page_size: 10000,
-      is_trashed: activeView === 'trash' ? true : false,
+      is_trashed: hasFolderPreview ? false : activeView === 'trash' ? true : false,
     }
 
-    if (activeView === 'unorganized') {
+    if (!hasFolderPreview && activeView === 'unorganized') {
       filters.unorganized = true
     }
 
@@ -508,12 +762,16 @@ export function AssetsPage() {
       filters.tags = tagFilter
     }
 
-    if (activeView === 'workspace' && activeWorkspaceId) {
+    if (!hasFolderPreview && activeView === 'workspace' && activeWorkspaceId) {
       filters.workspace_id = activeWorkspaceId
     }
 
     if (typeFilter && typeFilter.length > 0) {
       filters.asset_types = typeFilter
+    }
+
+    if (folderFilter && folderFilter.length > 0) {
+      filters.folder_path = folderFilter[0]
     }
 
     if (searchQuery) {
@@ -525,23 +783,20 @@ export function AssetsPage() {
         const result = await invoke('query_assets', { filters }) as any
         setAssets(result.items as AssetLite[])
       } catch (e) {
-        console.error('Failed to load filtered assets:', e)
+        const message = e instanceof Error ? e.message : String(e)
+        if (!message.includes("No library is currently open")) {
+          console.error('Failed to load filtered assets:', e)
+        }
       }
     }
 
     loadData()
-  }, [activeView, tagFilter, activeWorkspaceId, typeFilter, searchQuery, sortConfig])
+  }, [activeView, tagFilter, activeWorkspaceId, typeFilter, folderFilter, searchQuery, sortConfig, currentLibraryPath, refreshVersion])
 
   const filteredAssets = assets.filter(asset => {
     // Similar Search filter (highest priority if active)
     if (similarAssetIds) {
       return similarAssetIds.includes(asset.id);
-    }
-
-    // Folder filter (not handled by backend)
-    let matchesFolder = true;
-    if (folderFilter && folderFilter.length > 0) {
-      matchesFolder = folderFilter.some(folder => asset.path.includes(folder));
     }
 
     // Color filter (not handled by backend)
@@ -591,7 +846,7 @@ export function AssetsPage() {
       }
     }
 
-    return matchesFolder && matchesColor && matchesSize && matchesRating && matchesShape
+    return matchesColor && matchesSize && matchesRating && matchesShape
   }).sort((a, b) => {
     const { field, order } = sortConfig
     let comparison = 0
@@ -662,7 +917,7 @@ export function AssetsPage() {
             <ChevronRight className="w-5 h-5" />
           </button>
           <span className="ml-2 font-bold text-zinc-900 dark:text-zinc-100 truncate">
-            {similarAssetIds ? "相似图检索结果" : activeWorkspaceName}
+            {similarAssetIds ? "相似图检索结果" : currentFolderPath ? `文件夹预览: ${currentFolderPath}` : activeWorkspaceName}
           </span>
           {similarAssetIds && (
             <button
@@ -686,18 +941,23 @@ export function AssetsPage() {
           </div>
 
           {/* Sort Dropdown */}
-          <div className="relative group mr-2 shrink-0">
-            <button className="flex items-center gap-1 px-2 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition-colors text-sm whitespace-nowrap">
+          <div ref={sortMenuRef} className="relative mr-2 shrink-0">
+            <button
+              onClick={() => setIsSortOpen(v => !v)}
+              className="flex items-center gap-1 px-2 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition-colors text-sm whitespace-nowrap"
+            >
               排序 <ChevronDown className="w-3 h-3" />
             </button>
-            <div className="absolute top-full right-0 mt-1 hidden group-hover:flex flex-col bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg z-20 py-1 min-w-[120px]">
-              <button onClick={() => setSortConfig({ field: 'created_at', order: 'desc' })} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'created_at' && sortConfig.order === 'desc' ? 'text-indigo-500' : ''}`}>最新添加</button>
-              <button onClick={() => setSortConfig({ field: 'created_at', order: 'asc' })} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'created_at' && sortConfig.order === 'asc' ? 'text-indigo-500' : ''}`}>最早添加</button>
-              <button onClick={() => setSortConfig({ field: 'size', order: 'desc' })} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'size' && sortConfig.order === 'desc' ? 'text-indigo-500' : ''}`}>文件最大</button>
-              <button onClick={() => setSortConfig({ field: 'size', order: 'asc' })} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'size' && sortConfig.order === 'asc' ? 'text-indigo-500' : ''}`}>文件最小</button>
-              <button onClick={() => setSortConfig({ field: 'name', order: 'asc' })} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'name' && sortConfig.order === 'asc' ? 'text-indigo-500' : ''}`}>名称 A-Z</button>
-              <button onClick={() => setSortConfig({ field: 'rating', order: 'desc' })} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'rating' && sortConfig.order === 'desc' ? 'text-indigo-500' : ''}`}>评分最高</button>
-            </div>
+            {isSortOpen && (
+              <div className="absolute top-full right-0 mt-1 flex flex-col bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg z-20 py-1 min-w-[120px]">
+                <button onClick={() => { setSortConfig({ field: 'created_at', order: 'desc' }); setIsSortOpen(false) }} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'created_at' && sortConfig.order === 'desc' ? 'text-indigo-500' : ''}`}>最新添加</button>
+                <button onClick={() => { setSortConfig({ field: 'created_at', order: 'asc' }); setIsSortOpen(false) }} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'created_at' && sortConfig.order === 'asc' ? 'text-indigo-500' : ''}`}>最早添加</button>
+                <button onClick={() => { setSortConfig({ field: 'size', order: 'desc' }); setIsSortOpen(false) }} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'size' && sortConfig.order === 'desc' ? 'text-indigo-500' : ''}`}>文件最大</button>
+                <button onClick={() => { setSortConfig({ field: 'size', order: 'asc' }); setIsSortOpen(false) }} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'size' && sortConfig.order === 'asc' ? 'text-indigo-500' : ''}`}>文件最小</button>
+                <button onClick={() => { setSortConfig({ field: 'name', order: 'asc' }); setIsSortOpen(false) }} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'name' && sortConfig.order === 'asc' ? 'text-indigo-500' : ''}`}>名称 A-Z</button>
+                <button onClick={() => { setSortConfig({ field: 'rating', order: 'desc' }); setIsSortOpen(false) }} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'rating' && sortConfig.order === 'desc' ? 'text-indigo-500' : ''}`}>评分最高</button>
+              </div>
+            )}
           </div>
           <button className="p-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition-colors shrink-0">
             <Filter className="w-4 h-4" />
@@ -716,6 +976,23 @@ export function AssetsPage() {
               title="瀑布流视图"
             >
               <Columns className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => {
+                if (!isCanvasEnabled) return
+                setLayoutMode('canvas')
+              }}
+              disabled={!isCanvasEnabled}
+              className={`p-1 rounded transition-colors ${
+                !isCanvasEnabled
+                  ? 'bg-red-50 text-red-500/90 cursor-not-allowed dark:bg-red-950/30 dark:text-red-400/80'
+                  : layoutMode === 'canvas'
+                    ? 'bg-white dark:bg-zinc-700 shadow-sm text-zinc-900 dark:text-zinc-100'
+                    : 'hover:text-zinc-900 dark:hover:text-zinc-100'
+              }`}
+              title={isCanvasEnabled ? "无限画布" : "仅工作区可用"}
+            >
+              <Box className="w-4 h-4" />
             </button>
           </div>
           <div className="relative flex items-center ml-2 min-w-0 flex-1 max-w-[12rem]">
@@ -766,65 +1043,83 @@ export function AssetsPage() {
         {/* Filter Chips */}
         <div className="flex items-center gap-3 text-sm text-zinc-600 dark:text-zinc-400 whitespace-nowrap">
           {/* Tags */}
-          <div className="relative group">
-            <button className={`flex items-center gap-1 transition-colors ${tagFilter && tagFilter.length > 0 ? 'text-indigo-500 font-medium' : 'hover:text-zinc-900 dark:hover:text-zinc-100'}`}>
+          <div className="relative">
+            <button
+              onClick={() => setIsTagFilterOpen(!isTagFilterOpen)}
+              className={`flex items-center gap-1 transition-colors ${tagFilter && tagFilter.length > 0 ? 'text-indigo-500 font-medium' : 'hover:text-zinc-900 dark:hover:text-zinc-100'}`}
+            >
+              <Tag className="w-3 h-3" />
               {tagFilter && tagFilter.length > 0 ? `标签: ${tagFilter.length}项` : '标签'} <ChevronDown className="w-3 h-3" />
             </button>
-            <div className="absolute top-full left-0 mt-1 hidden group-hover:flex flex-col bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg z-10 py-1 min-w-[120px] max-h-48 overflow-y-auto no-scrollbar">
-              <button onClick={() => setTagFilter(null)} className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800">清除筛选</button>
-              {allTags.length > 0 ? allTags.map((tag: any) => {
-                const isSelected = tagFilter?.includes(tag)
-                return (
-                  <button
-                    key={tag}
-                    onClick={() => {
-                      const current = tagFilter || []
-                      if (isSelected) {
-                        setTagFilter(current.filter(t => t !== tag))
-                      } else {
-                        setTagFilter([...current, tag])
-                      }
-                    }}
-                    className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-between"
-                  >
-                    <span>{tag}</span>
-                    {isSelected && <span className="w-2 h-2 rounded-full bg-indigo-500" />}
-                  </button>
-                )
-              }) : (
-                <div className="px-3 py-1.5 text-xs text-zinc-500 italic">暂无标签</div>
-              )}
-            </div>
+            {isTagFilterOpen && (
+              <>
+                <div className="fixed inset-0 z-[9]" onClick={() => setIsTagFilterOpen(false)} />
+                <div className="absolute top-full left-0 mt-1 flex flex-col bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg z-10 py-1 min-w-[120px] max-h-48 overflow-y-auto no-scrollbar">
+                  <button onClick={() => { setTagFilter(null); setIsTagFilterOpen(false) }} className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800">清除筛选</button>
+                  {allTags.length > 0 ? allTags.map((tag: any) => {
+                    const isSelected = tagFilter?.includes(tag)
+                    return (
+                      <button
+                        key={tag}
+                        onClick={() => {
+                          const current = tagFilter || []
+                          if (isSelected) {
+                            setTagFilter(current.filter(t => t !== tag))
+                          } else {
+                            setTagFilter([...current, tag])
+                          }
+                        }}
+                        className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-between"
+                      >
+                        <span>{tag}</span>
+                        {isSelected && <span className="w-2 h-2 rounded-full bg-indigo-500" />}
+                      </button>
+                    )
+                  }) : (
+                    <div className="px-3 py-1.5 text-xs text-zinc-500 italic">暂无标签</div>
+                  )}
+                </div>
+              </>
+            )}
           </div>
 
           {/* Type */}
-          <div className="relative group">
-            <button className={`flex items-center gap-1 transition-colors ${typeFilter && typeFilter.length > 0 ? 'text-indigo-500 font-medium' : 'hover:text-zinc-900 dark:hover:text-zinc-100'}`}>
+          <div className="relative">
+            <button
+              onClick={() => setIsTypeFilterOpen(!isTypeFilterOpen)}
+              className={`flex items-center gap-1 transition-colors ${typeFilter && typeFilter.length > 0 ? 'text-indigo-500 font-medium' : 'hover:text-zinc-900 dark:hover:text-zinc-100'}`}
+            >
+              <Image className="w-3 h-3" />
               {typeFilter && typeFilter.length > 0 ? `类型: ${typeFilter.length}项` : '类型'} <ChevronDown className="w-3 h-3" />
             </button>
-            <div className="absolute top-full left-0 mt-1 hidden group-hover:flex flex-col bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg z-10 py-1 min-w-[100px]">
-              <button onClick={() => setTypeFilter(null)} className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800">全部</button>
-              {['image', 'video', 'document'].map(t => {
-                const isSelected = typeFilter?.includes(t)
-                return (
-                  <button
-                    key={t}
-                    onClick={() => {
-                      const current = typeFilter || []
-                      if (isSelected) {
-                        setTypeFilter(current.filter(x => x !== t))
-                      } else {
-                        setTypeFilter([...current, t])
-                      }
-                    }}
-                    className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-between"
-                  >
-                    <span>{t === 'image' ? '图片' : t === 'video' ? '视频' : '文档'}</span>
-                    {isSelected && <span className="w-2 h-2 rounded-full bg-indigo-500" />}
-                  </button>
-                )
-              })}
-            </div>
+            {isTypeFilterOpen && (
+              <>
+                <div className="fixed inset-0 z-[9]" onClick={() => setIsTypeFilterOpen(false)} />
+                <div className="absolute top-full left-0 mt-1 flex flex-col bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg z-10 py-1 min-w-[100px]">
+                  <button onClick={() => { setTypeFilter(null); setIsTypeFilterOpen(false) }} className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800">全部</button>
+                  {['image', 'video', 'document'].map(t => {
+                    const isSelected = typeFilter?.includes(t)
+                    return (
+                      <button
+                        key={t}
+                        onClick={() => {
+                          const current = typeFilter || []
+                          if (isSelected) {
+                            setTypeFilter(current.filter(x => x !== t))
+                          } else {
+                            setTypeFilter([...current, t])
+                          }
+                        }}
+                        className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-between"
+                      >
+                        <span>{t === 'image' ? '图片' : t === 'video' ? '视频' : '文档'}</span>
+                        {isSelected && <span className="w-2 h-2 rounded-full bg-indigo-500" />}
+                      </button>
+                    )
+                  })}
+                </div>
+              </>
+            )}
           </div>
 
           {/* Size Filter */}
@@ -953,30 +1248,95 @@ export function AssetsPage() {
       {/* Grid Area */}
       <ContextMenu.Root>
         <ContextMenu.Trigger className="flex-1 flex flex-col h-full overflow-hidden relative selecto-area">
-          <Selecto
-            dragContainer={".selecto-area"}
-            selectableTargets={[".selectable-asset"]}
-            selectByClick={false}
-            selectFromInside={false}
-            hitRate={10}
-            onSelectEnd={e => {
-              if (e.isDragStart) return;
-              const ids = e.selected.map(el => el.getAttribute("data-id")).filter(Boolean) as string[];
-              if (e.inputEvent.ctrlKey || e.inputEvent.metaKey || e.inputEvent.shiftKey) {
-                setSelectedAssets(Array.from(new Set([...selectedAssets, ...ids])));
-              } else {
-                setSelectedAssets(ids);
-              }
-            }}
-          />
+          {layoutMode !== 'canvas' && (
+            <Selecto
+              dragContainer={".selecto-area"}
+              selectableTargets={[".selectable-asset"]}
+              selectByClick={false}
+              selectFromInside={false}
+              hitRate={10}
+              onSelectEnd={e => {
+                if (e.isDragStart) return;
+                const ids = e.selected.map(el => el.getAttribute("data-id")).filter(Boolean) as string[];
+                if (e.inputEvent.ctrlKey || e.inputEvent.metaKey || e.inputEvent.shiftKey) {
+                  setSelectedAssets(Array.from(new Set([...selectedAssets, ...ids])));
+                } else {
+                  setSelectedAssets(ids);
+                }
+              }}
+            />
+          )}
           <div
             ref={parentRef}
-            className="flex-1 overflow-y-auto p-6 bg-white dark:bg-[#121212]"
+            className={`flex-1 bg-white dark:bg-[#121212] ${layoutMode === 'canvas' ? 'overflow-hidden p-0' : 'overflow-y-auto p-6'}`}
           >
-            {filteredAssets.length === 0 ? (
+            {layoutMode !== 'canvas' && currentFolderPath && isCurrentFolderCardPreviewVisible && (
+              <div className="mb-6">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">文件夹卡片视图</h3>
+                  {currentFolderInfo && (
+                    <button
+                      onClick={handleOpenParentFolder}
+                      className="text-xs px-2 py-1 rounded-md bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors"
+                    >
+                      返回上级
+                    </button>
+                  )}
+                </div>
+                {childFolders.length > 0 ? (
+                  <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
+                    {childFolders.map((folder) => {
+                      const folderPreviewSrc = getFolderPreviewSrc(folder)
+                      return (
+                        <button
+                          key={folder.path}
+                          onClick={() => handleOpenFolderPreview(folder.path)}
+                          className="group rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-3 text-left hover:border-indigo-400 dark:hover:border-indigo-500/60 hover:shadow-sm transition-all"
+                          title={folder.path}
+                        >
+                          <div className="flex items-center justify-between mb-1.5">
+                            <Folder className="w-4 h-4 text-indigo-500" />
+                            <span className="text-[11px] text-zinc-500">{folder.asset_count}</span>
+                          </div>
+                          {folderPreviewSrc ? (
+                            <div className="mb-2 rounded-lg overflow-hidden border border-zinc-200/70 dark:border-zinc-800/70 bg-zinc-100 dark:bg-zinc-950">
+                              <img
+                                src={folderPreviewSrc}
+                                alt={folder.display_name}
+                                loading="lazy"
+                                decoding="async"
+                                className="w-full h-24 object-cover transition-transform duration-200 group-hover:scale-[1.02]"
+                              />
+                            </div>
+                          ) : null}
+                          <p className="text-[13px] font-medium text-zinc-800 dark:text-zinc-200 truncate">
+                            {folder.display_name}
+                          </p>
+                        </button>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <div className="text-xs text-zinc-500 px-1">当前目录没有子文件夹</div>
+                )}
+              </div>
+            )}
+
+            {layoutMode === 'canvas' && isCanvasEnabled ? (
+              <WorkspaceCanvasView
+                assets={filteredAssets}
+                selectedAssetIds={selectedAssets}
+                onSelectionChange={(ids) => setSelectedAssets(ids)}
+                thumbnailSize={thumbnailSize}
+                onOpenPreview={(asset) => setPreviewAsset(asset, true)}
+                persistenceKey={canvasPersistenceKey}
+              />
+            ) : filteredAssets.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-zinc-500">
-                <p>没有找到资产</p>
-                <p className="text-sm">请尝试调整筛选条件或导入新的文件夹。</p>
+                <p>{currentFolderPath ? '当前文件夹没有可显示资源' : '没有找到资产'}</p>
+                <p className="text-sm">
+                  {currentFolderPath ? '可以通过上方文件夹卡片继续浏览，或调整显示子文件夹设置。' : '请尝试调整筛选条件或导入新的文件夹。'}
+                </p>
               </div>
             ) : layoutMode === 'masonry' ? (
               // Non-virtualized Masonry fallback for complex layouts
@@ -1000,14 +1360,18 @@ export function AssetsPage() {
                       onContextMenu={() => handleAssetContextMenu(asset.id)}
                       onPreview={() => setPreviewAsset(asset, true)}
                       onShowInFolder={() => handleShowInFolder(asset.path)}
+                      onPreviewFolder={() => handlePreviewFolderFromAsset(asset.path)}
                       onSearchSimilar={() => handleSearchSimilar(asset.id)}
                       onDelete={(hard: boolean) => handleDeleteAsset(asset.id, hard)}
-                      onAssignWorkspace={(wsId: string) => {
+                      onQuickAddTag={() => handleQuickAddTag(asset.id)}
+                      onAssignWorkspace={async (wsId: string) => {
                         // Workspace assignment now requires detail data
-                        safeInvoke("update_asset", {
+                        await safeInvoke("update_asset", {
                           id: asset.id,
+                          workspaceIds: JSON.stringify([wsId]),
                           workspace_ids: JSON.stringify([wsId]),
                         });
+                        triggerRefresh()
                       }}
                       activeView={activeView}
                     />
@@ -1058,13 +1422,17 @@ export function AssetsPage() {
                           onContextMenu={() => handleAssetContextMenu(asset.id)}
                           onPreview={() => setPreviewAsset(asset, true)}
                           onShowInFolder={() => handleShowInFolder(asset.path)}
+                          onPreviewFolder={() => handlePreviewFolderFromAsset(asset.path)}
                           onSearchSimilar={() => handleSearchSimilar(asset.id)}
                           onDelete={(hard: boolean) => handleDeleteAsset(asset.id, hard)}
-                          onAssignWorkspace={(wsId: string) => {
-                            safeInvoke("update_asset", {
+                          onQuickAddTag={() => handleQuickAddTag(asset.id)}
+                          onAssignWorkspace={async (wsId: string) => {
+                            await safeInvoke("update_asset", {
                               id: asset.id,
+                              workspaceIds: JSON.stringify([wsId]),
                               workspace_ids: JSON.stringify([wsId]),
                             });
+                            triggerRefresh()
                           }}
                           activeView={activeView}
                         />

@@ -3,7 +3,8 @@ use crate::library;
 use tauri::{Emitter, Manager, State};
 use notify::Watcher;
 use image::GenericImageView;
-use std::path::PathBuf;
+use rusqlite::OptionalExtension;
+use std::path::{Path, PathBuf};
 use image_hasher;
 
 fn get_library_root(state: &State<'_, crate::library::AppState>) -> Result<std::path::PathBuf, String> {
@@ -16,6 +17,90 @@ fn get_db_path(state: &State<'_, crate::library::AppState>) -> Result<std::path:
     state.db_path.read().map_err(|e| e.to_string())?
         .clone()
         .ok_or("No library is currently open".into())
+}
+
+fn needs_transcoded_preview(path_or_name: &str) -> bool {
+    let ext = std::path::Path::new(path_or_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(ext.as_str(), "psd" | "psb" | "clip")
+}
+
+fn sampled_image_quality(img: &image::DynamicImage) -> (f32, u8) {
+    let tiny = img.thumbnail(64, 64).to_rgba8();
+    let total = tiny.width().saturating_mul(tiny.height());
+    if total == 0 {
+        return (0.0, 0);
+    }
+
+    let mut non_transparent: u32 = 0;
+    let mut min_luma: u8 = u8::MAX;
+    let mut max_luma: u8 = 0;
+    for px in tiny.pixels() {
+        let [r, g, b, a] = px.0;
+        if a <= 8 {
+            continue;
+        }
+        non_transparent = non_transparent.saturating_add(1);
+        let luma = ((r as u16 + g as u16 + b as u16) / 3) as u8;
+        if luma < min_luma {
+            min_luma = luma;
+        }
+        if luma > max_luma {
+            max_luma = luma;
+        }
+    }
+
+    if non_transparent == 0 {
+        return (0.0, 0);
+    }
+
+    let ratio = non_transparent as f32 / total as f32;
+    let contrast = max_luma.saturating_sub(min_luma);
+    (ratio, contrast)
+}
+
+fn image_has_visible_content(img: &image::DynamicImage) -> bool {
+    let (ratio, contrast) = sampled_image_quality(img);
+    ratio >= 0.03 && contrast >= 8
+}
+
+fn preview_cache_has_visible_content(preview_path: &Path) -> bool {
+    match image::open(preview_path) {
+        Ok(img) => image_has_visible_content(&img),
+        Err(_) => false,
+    }
+}
+
+fn sync_asset_dimensions(
+    conn: &rusqlite::Connection,
+    asset_path: &str,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE assets SET width = ?1, height = ?2 WHERE path = ?3",
+        rusqlite::params![width, height, asset_path],
+    )
+    .map_err(|e| format!("Failed to update asset dimensions: {}", e))?;
+    Ok(())
+}
+
+fn clip_debug_enabled() -> bool {
+    matches!(
+        std::env::var("QUICKASSET_CLIP_DEBUG").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("on") | Some("ON")
+    )
+}
+
+macro_rules! clip_debug {
+    ($($arg:tt)*) => {
+        if clip_debug_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
 }
 
 #[tauri::command]
@@ -137,6 +222,7 @@ pub async fn query_assets(
     state: State<'_, crate::library::AppState>,
 ) -> Result<QueryResult, String> {
     let db_path = get_db_path(&state)?;
+    let library_root = get_library_root(&state)?;
 
     tokio::task::spawn_blocking(move || {
         let conn = library::get_db_connection(&db_path)?;
@@ -175,11 +261,14 @@ pub async fn query_assets(
         }
 
         if let Some(ref folder) = filters.folder_path {
-            let folder_clean = folder.trim_end_matches('/').to_string();
+            let folder_clean = folder
+                .replace('\\', "/")
+                .trim_matches('/')
+                .to_string();
             // Check if this folder has show_subfolders enabled
             let show_subfolders: bool = {
                 let mut check_stmt = conn.prepare(
-                    "SELECT COALESCE(show_subfolders, 1) FROM folders WHERE path = ?1"
+                    "SELECT COALESCE(show_subfolders, 1) FROM folders WHERE REPLACE(path, char(92), '/') = ?1"
                 ).ok();
                 if let Some(ref mut stmt) = check_stmt {
                     stmt.query_row(rusqlite::params![folder_clean], |row| {
@@ -191,16 +280,21 @@ pub async fn query_assets(
                 }
             };
 
-            if show_subfolders {
-                // Show assets in this folder and all subfolders
-                where_clauses.push("relative_path LIKE ?".to_string());
-                param_values.push(Box::new(format!("{}/%", folder_clean)));
-            } else {
-                // Show only assets directly in this folder (not subfolders)
-                where_clauses.push("(relative_path LIKE ? AND relative_path NOT LIKE ?)".to_string());
-                param_values.push(Box::new(format!("{}/%", folder_clean)));
-                // Exclude deeper paths: anything with another '/' after the folder prefix
-                param_values.push(Box::new(format!("{}/%/%", folder_clean)));
+            if !folder_clean.is_empty() {
+                if show_subfolders {
+                    // Show assets in this folder and all subfolders.
+                    where_clauses.push("REPLACE(relative_path, char(92), '/') LIKE ?".to_string());
+                    param_values.push(Box::new(format!("{}/%", folder_clean)));
+                } else {
+                    // Show only assets directly in this folder (not subfolders).
+                    where_clauses.push(
+                        "(REPLACE(relative_path, char(92), '/') LIKE ? AND REPLACE(relative_path, char(92), '/') NOT LIKE ?)"
+                            .to_string(),
+                    );
+                    param_values.push(Box::new(format!("{}/%", folder_clean)));
+                    // Exclude deeper paths: anything with another '/' after the folder prefix
+                    param_values.push(Box::new(format!("{}/%/%", folder_clean)));
+                }
             }
         }
 
@@ -258,7 +352,7 @@ pub async fn query_assets(
 
         // Query page
         let query_sql = format!(
-            "SELECT id, name, path, asset_type, size, dominant_color, width, height, created_at, modified_at, rating, is_trashed \
+            "SELECT id, name, path, asset_type, size, dominant_color, width, height, created_at, modified_at, rating, is_trashed, relative_path \
              FROM assets {} ORDER BY {} {} LIMIT ? OFFSET ?",
             where_sql, sort_field, sort_order
         );
@@ -272,6 +366,13 @@ pub async fn query_assets(
         let mut stmt = conn.prepare(&query_sql).map_err(|e| format!("Query prepare failed: {}", e))?;
         let rows = stmt.query_map(query_params.as_slice(), |row| {
             let is_trashed_i32: i32 = row.get(11)?;
+            let relative_path: String = row.get(12)?;
+            let thumb_path = crate::thumbnails::thumbnail_abs_path(&library_root, &relative_path);
+            let thumbnail_path = if thumb_path.exists() {
+                Some(thumb_path.to_string_lossy().to_string())
+            } else {
+                None
+            };
             Ok(AssetInfoLite {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -285,6 +386,7 @@ pub async fn query_assets(
                 modified_at: row.get(9)?,
                 rating: row.get(10)?,
                 is_trashed: is_trashed_i32 != 0,
+                thumbnail_path,
             })
         }).map_err(|e| format!("Query execution failed: {}", e))?;
 
@@ -353,6 +455,251 @@ pub async fn get_asset_detail(
             thumbnail_path: thumbnail_path_str,
             ..detail
         })
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn ensure_asset_thumbnail(
+    id: String,
+    state: State<'_, crate::library::AppState>,
+) -> Result<Option<String>, String> {
+    let db_path = get_db_path(&state)?;
+    let library_root = get_library_root(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        let conn = library::get_db_connection(&db_path)?;
+
+        let mut stmt = conn.prepare(
+            "SELECT path, relative_path, asset_type FROM assets WHERE id = ?1"
+        ).map_err(|e| format!("Prepare failed: {}", e))?;
+
+        let (path, relative_path, asset_type): (String, String, String) = stmt
+            .query_row(rusqlite::params![id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(|e| format!("Asset not found: {}", e))?;
+
+        if asset_type != "image" && asset_type != "video" {
+            return Ok(None);
+        }
+
+        let thumb_path = crate::thumbnails::thumbnail_abs_path(&library_root, &relative_path);
+        if thumb_path.exists() {
+            return Ok(Some(thumb_path.to_string_lossy().to_string()));
+        }
+
+        let abs_path = std::path::Path::new(&path);
+        if !abs_path.exists() {
+            return Ok(None);
+        }
+
+        let processed = if asset_type == "video" {
+            crate::scanner::process_video(&library_root, &relative_path, abs_path)
+        } else {
+            crate::scanner::process_image(&library_root, &relative_path, abs_path)
+        };
+        if processed.thumbnail_mtime.is_none() {
+            return Ok(None);
+        }
+
+        let width = if processed.width > 0 { Some(processed.width) } else { None };
+        let height = if processed.height > 0 { Some(processed.height) } else { None };
+
+        conn.execute(
+            "UPDATE assets SET dominant_color = ?1, width = ?2, height = ?3, p_hash = ?4, thumbnail_mtime = ?5 WHERE path = ?6",
+            rusqlite::params![
+                processed.dominant_color,
+                width,
+                height,
+                processed.p_hash,
+                processed.thumbnail_mtime,
+                path,
+            ],
+        ).map_err(|e| format!("Failed to update asset thumbnail metadata: {}", e))?;
+
+        if thumb_path.exists() {
+            Ok(Some(thumb_path.to_string_lossy().to_string()))
+        } else {
+            Ok(None)
+        }
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn ensure_asset_full_preview(
+    id: String,
+    state: State<'_, crate::library::AppState>,
+) -> Result<Option<String>, String> {
+    let db_path = get_db_path(&state)?;
+    let library_root = get_library_root(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        let conn = library::get_db_connection(&db_path)?;
+
+        let mut stmt = conn.prepare(
+            "SELECT path, relative_path, asset_type FROM assets WHERE id = ?1"
+        ).map_err(|e| format!("Prepare failed: {}", e))?;
+
+        let (path, relative_path, asset_type): (String, String, String) = stmt
+            .query_row(rusqlite::params![id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(|e| format!("Asset not found: {}", e))?;
+
+        if asset_type != "image" {
+            return Ok(None);
+        }
+
+        if !needs_transcoded_preview(&path) {
+            return Ok(Some(path));
+        }
+
+        let is_clip = std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("clip"))
+            .unwrap_or(false);
+
+        let abs_path = std::path::Path::new(&path);
+        if !abs_path.exists() {
+            return Ok(None);
+        }
+
+        let preview_path = crate::thumbnails::ensure_preview_dir(&library_root, &relative_path)?;
+        if preview_path.exists() {
+            let cached_dims = image::image_dimensions(&preview_path).ok();
+            let preview_decodable = cached_dims.is_some();
+            let preview_quality = if is_clip {
+                image::open(&preview_path).ok().map(|img| sampled_image_quality(&img))
+            } else {
+                None
+            };
+            let preview_content_valid = if is_clip {
+                preview_cache_has_visible_content(&preview_path)
+            } else {
+                true
+            };
+            let source_newer_than_preview = match (
+                std::fs::metadata(abs_path).and_then(|m| m.modified()),
+                std::fs::metadata(&preview_path).and_then(|m| m.modified()),
+            ) {
+                (Ok(src_mtime), Ok(preview_mtime)) => src_mtime > preview_mtime,
+                _ => false,
+            };
+
+            if preview_decodable && preview_content_valid && !source_newer_than_preview {
+                if let Some((w, h)) = cached_dims {
+                    let _ = sync_asset_dimensions(&conn, &path, w, h);
+                }
+                if is_clip {
+                    if let Some((w, h)) = cached_dims {
+                        let quality_suffix = preview_quality
+                            .map(|(ratio, contrast)| format!(" ratio={:.4} contrast={}", ratio, contrast))
+                            .unwrap_or_default();
+                        clip_debug!(
+                            "[CLIP_DEBUG] cache hit '{}' => {}x{}{}",
+                            abs_path.display(),
+                            w,
+                            h,
+                            quality_suffix
+                        );
+                    } else {
+                        clip_debug!(
+                            "[CLIP_DEBUG] cache hit '{}' => decodable but dimensions unknown",
+                            abs_path.display()
+                        );
+                    }
+                }
+                return Ok(Some(preview_path.to_string_lossy().to_string()));
+            }
+
+            if is_clip {
+                let quality_suffix = preview_quality
+                    .map(|(ratio, contrast)| format!(" ratio={:.4} contrast={}", ratio, contrast))
+                    .unwrap_or_default();
+                clip_debug!(
+                    "[CLIP_DEBUG] cache invalid '{}' decodable={} visible={} source_newer={}{}",
+                    abs_path.display(),
+                    preview_decodable,
+                    preview_content_valid,
+                    source_newer_than_preview,
+                    quality_suffix
+                );
+            }
+            let _ = std::fs::remove_file(&preview_path);
+        }
+
+        let img = match crate::scanner::open_image_for_full_preview(abs_path) {
+            Ok(img) => img,
+            Err(full_err) => match crate::scanner::open_image_for_processing(abs_path) {
+                Ok(fallback_img) => {
+                    eprintln!(
+                        "Full preview decode failed for '{}': {}. Falling back to processing preview.",
+                        abs_path.display(),
+                        full_err
+                    );
+                    fallback_img
+                }
+                Err(fallback_err) => {
+                    eprintln!(
+                        "Failed to decode full preview for '{}': {}. Fallback failed: {}",
+                        abs_path.display(),
+                        full_err,
+                        fallback_err
+                    );
+                    return Ok(None);
+                }
+            },
+        };
+
+        let img = if is_clip && !image_has_visible_content(&img) {
+            clip_debug!(
+                "[CLIP_DEBUG] generated image is not visually valid for '{}', retrying processing preview",
+                abs_path.display()
+            );
+            match crate::scanner::open_image_for_processing(abs_path) {
+                Ok(retry_img) if image_has_visible_content(&retry_img) => retry_img,
+                Ok(retry_img) => {
+                    clip_debug!(
+                        "[CLIP_DEBUG] processing preview also not visually valid for '{}', returning None",
+                        abs_path.display()
+                    );
+                    let _ = retry_img;
+                    return Ok(None);
+                }
+                Err(retry_err) => {
+                    clip_debug!(
+                        "[CLIP_DEBUG] processing preview retry failed for '{}': {}",
+                        abs_path.display(),
+                        retry_err
+                    );
+                    return Ok(None);
+                }
+            }
+        } else {
+            img
+        };
+
+        if is_clip {
+            let (ratio, contrast) = sampled_image_quality(&img);
+            clip_debug!(
+                "[CLIP_DEBUG] generated preview '{}' => {}x{} ratio={:.4} contrast={}",
+                abs_path.display(),
+                img.width(),
+                img.height(),
+                ratio,
+                contrast
+            );
+        }
+
+        let file = std::fs::File::create(&preview_path)
+            .map_err(|e| format!("Failed to create preview file: {}", e))?;
+        let mut writer = std::io::BufWriter::new(file);
+        img.write_to(&mut writer, image::ImageFormat::Png)
+            .map_err(|e| format!("Failed to write preview image: {}", e))?;
+        let _ = sync_asset_dimensions(&conn, &path, img.width(), img.height());
+
+        Ok(Some(preview_path.to_string_lossy().to_string()))
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -467,34 +814,77 @@ pub async fn get_folders(
     state: State<'_, crate::library::AppState>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let db_path = get_db_path(&state)?;
+    let library_root = get_library_root(&state)?;
 
     tokio::task::spawn_blocking(move || {
         let conn = library::get_db_connection(&db_path)?;
 
-        let mut stmt = conn
+        let mut folder_stmt = conn
             .prepare("SELECT path, parent_path, display_name, asset_count, COALESCE(show_subfolders, 1) FROM folders ORDER BY path")
             .map_err(|e| e.to_string())?;
 
-        let rows = stmt
+        let mut preview_stmt = conn
+            .prepare(
+                "SELECT path, relative_path, asset_type
+                 FROM assets
+                 WHERE REPLACE(relative_path, char(92), '/') LIKE ?1
+                   AND asset_type IN ('image', 'video')
+                 ORDER BY modified_at DESC
+                 LIMIT 1",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let rows = folder_stmt
             .query_map([], |row| {
-                let path: String = row.get(0)?;
-                let parent_path: Option<String> = row.get(1)?;
-                let display_name: String = row.get(2)?;
-                let asset_count: i32 = row.get(3)?;
-                let show_subfolders_i32: i32 = row.get(4)?;
-                Ok(serde_json::json!({
-                    "path": path,
-                    "parent_path": parent_path,
-                    "display_name": display_name,
-                    "asset_count": asset_count,
-                    "show_subfolders": show_subfolders_i32 != 0,
-                }))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i32>(3)?,
+                    row.get::<_, i32>(4)?,
+                ))
             })
             .map_err(|e| e.to_string())?;
 
         let mut folders = Vec::new();
         for row in rows {
-            folders.push(row.map_err(|e: rusqlite::Error| e.to_string())?);
+            let (path, parent_path, display_name, asset_count, show_subfolders_i32) =
+                row.map_err(|e: rusqlite::Error| e.to_string())?;
+
+            let normalized_path = path.replace('\\', "/");
+            let normalized_parent_path = parent_path.map(|p| p.replace('\\', "/"));
+            let like_pattern = format!("{}/%", normalized_path);
+            let preview_asset: Option<(String, String, String)> = preview_stmt
+                .query_row(rusqlite::params![like_pattern], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .optional()
+                .map_err(|e| e.to_string())?;
+
+            let mut preview_thumbnail_path: Option<String> = None;
+            let mut preview_asset_path: Option<String> = None;
+            let mut preview_asset_type: Option<String> = None;
+            if let Some((asset_path, relative_path, asset_type)) = preview_asset {
+                let thumb_path = crate::thumbnails::thumbnail_abs_path(&library_root, &relative_path);
+                if thumb_path.exists() {
+                    preview_thumbnail_path = Some(thumb_path.to_string_lossy().to_string());
+                }
+                if preview_thumbnail_path.is_none() && asset_type == "image" {
+                    preview_asset_path = Some(asset_path);
+                }
+                preview_asset_type = Some(asset_type);
+            }
+
+            folders.push(serde_json::json!({
+                "path": normalized_path,
+                "parent_path": normalized_parent_path,
+                "display_name": display_name,
+                "asset_count": asset_count,
+                "show_subfolders": show_subfolders_i32 != 0,
+                "preview_thumbnail_path": preview_thumbnail_path,
+                "preview_asset_path": preview_asset_path,
+                "preview_asset_type": preview_asset_type,
+            }));
         }
 
         Ok(folders)
@@ -511,9 +901,10 @@ pub async fn update_folder_show_subfolders(
 
     tokio::task::spawn_blocking(move || {
         let conn = library::get_db_connection(&db_path)?;
+        let normalized_folder = folder_path.replace('\\', "/").trim_matches('/').to_string();
         conn.execute(
-            "UPDATE folders SET show_subfolders = ?1 WHERE path = ?2",
-            rusqlite::params![show_subfolders as i32, folder_path],
+            "UPDATE folders SET show_subfolders = ?1 WHERE REPLACE(path, char(92), '/') = ?2",
+            rusqlite::params![show_subfolders as i32, normalized_folder],
         ).map_err(|e| format!("Failed to update folder show_subfolders: {}", e))?;
         Ok(())
     }).await.map_err(|e| e.to_string())?
@@ -638,7 +1029,7 @@ pub async fn migrate_hashed(
             let abs_path = std::path::Path::new(path_str);
             if !abs_path.exists() { continue; }
 
-            let img = match image::open(abs_path) {
+            let img = match crate::scanner::open_image_for_processing(abs_path) {
                 Ok(img) => img,
                 Err(_) => continue,
             };
@@ -831,6 +1222,39 @@ pub async fn get_workspaces(
     }
 
     Ok(workspaces)
+}
+
+#[tauri::command]
+pub async fn get_library_stats(
+    state: State<'_, crate::library::AppState>,
+) -> Result<serde_json::Value, String> {
+    let db_path = get_db_path(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        let conn = library::get_db_connection(&db_path)?;
+
+        let (active_count, total_size): (u64, u64) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM assets WHERE is_trashed = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| format!("Failed to query active stats: {}", e))?;
+
+        let trashed_count: u64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM assets WHERE is_trashed = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to query trash stats: {}", e))?;
+
+        Ok(serde_json::json!({
+            "active_count": active_count,
+            "trashed_count": trashed_count,
+            "total_size": total_size,
+        }))
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

@@ -35,6 +35,9 @@ notify = "6.1.1"
 open = "5.3.3"
 uuid = { version = "1", features = ["v4"] }
 image_hasher = "3.1"
+psd = "0.3"
+flate2 = "1.0"
+tempfile = "3.10"
 
 [dev-dependencies]
 tempfile = "3.10"
