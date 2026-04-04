@@ -1,6 +1,7 @@
 use crate::models::*;
 use crate::library;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
+use notify::Watcher;
 use std::path::PathBuf;
 use image_hasher;
 
@@ -804,4 +805,152 @@ pub async fn read_file_text(path: String) -> Result<String, String> {
         std::fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read file: {}", e))
     }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn set_folder_show_subfolders(
+    folder_path: String,
+    show_subfolders: bool,
+    state: State<'_, crate::library::AppState>,
+) -> Result<(), String> {
+    let db_path = get_db_path(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        let conn = library::get_db_connection(&db_path)?;
+
+        conn.execute(
+            "UPDATE folders SET show_subfolders = ?1 WHERE path = ?2",
+            rusqlite::params![show_subfolders as i32, folder_path],
+        ).map_err(|e| format!("Failed to update folder: {}", e))?;
+
+        Ok(())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn migrate_missing_hashes(
+    state: State<'_, crate::library::AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<u32, String> {
+    let db_path = get_db_path(&state)?;
+    let library_root = get_library_root(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        let conn = library::get_db_connection(&db_path)?;
+
+        // Find all image assets with missing p_hash
+        let mut stmt = conn.prepare(
+            "SELECT id, path, relative_path FROM assets WHERE asset_type = 'image' AND (p_hash IS NULL OR p_hash = '')"
+        ).map_err(|e| format!("Prepare failed: {}", e))?;
+
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .map_err(|e| format!("Query failed: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let total = rows.len() as u32;
+        let mut migrated: u32 = 0;
+
+        for (i, (_id, abs_path_str, relative_path)) in rows.iter().enumerate() {
+            let abs_path = std::path::Path::new(abs_path_str);
+            if !abs_path.exists() {
+                continue;
+            }
+
+            // Process image to get hash
+            let img = match image::open(abs_path) {
+                Ok(img) => img,
+                Err(_) => continue,
+            };
+
+            let hasher = image_hasher::HasherConfig::new()
+                .hash_alg(image_hasher::HashAlg::Gradient)
+                .to_hasher();
+            let hash = hasher.hash_image(&img);
+            let hash_b64 = hash.to_base64();
+
+            // Also re-generate thumbnail if needed
+            let thumbnail_mtime = {
+                let thumb_result = crate::scanner::generate_thumbnail(
+                    &library_root, relative_path, &img,
+                );
+                match thumb_result {
+                    Ok(mtime) => Some(mtime),
+                    Err(_) => None,
+                }
+            };
+
+            // Update the asset
+            conn.execute(
+                "UPDATE assets SET p_hash = ?1, thumbnail_mtime = COALESCE(?2, thumbnail_mtime) WHERE id = ?3",
+                rusqlite::params![hash_b64, thumbnail_mtime, _id],
+            ).map_err(|e| format!("Update failed: {}", e))?;
+
+            migrated += 1;
+
+            if (i + 1) % 50 == 0 || (i + 1) == total as usize {
+                let _ = app_handle.emit("migration-progress", serde_json::json!({
+                    "migrated": migrated,
+                    "total": total,
+                }));
+            }
+        }
+
+        Ok(migrated)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn start_watcher(
+    state: State<'_, crate::library::AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let library_root = get_library_root(&state)?;
+
+    // Stop existing watcher if any
+    *state.watcher_handle.lock().map_err(|e| e.to_string())? = None;
+
+    let root_for_closure = library_root.clone();
+
+    let watcher: Result<notify::RecommendedWatcher, notify::Error> =
+        notify::RecommendedWatcher::new(
+            move |res: Result<notify::Event, notify::Error>| {
+                match res {
+                    Ok(event) => {
+                        // Filter out internal files and non-creation/modification events
+                        let relevant = event.paths.iter().any(|p| {
+                            let name = p.file_name().unwrap_or_default().to_string_lossy();
+                            // Skip .quickasset internal directory
+                            if name == ".quickasset" { return false; }
+                            // Skip db files
+                            if name.ends_with(".db") || name.ends_with("-journal") { return false; }
+                            // Skip hidden files
+                            if name.starts_with('.') { return false; }
+                            true
+                        });
+
+                        if relevant {
+                            let _ = app_handle.emit("fs-event", serde_json::json!({
+                                "kind": format!("{:?}", event.kind),
+                                "paths": event.paths.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
+                            }));
+                        }
+                    }
+                    Err(_) => {}
+                }
+            },
+            notify::Config::default().with_poll_interval(std::time::Duration::from_secs(2)),
+        );
+
+    let mut watcher = watcher.map_err(|e| format!("Failed to create watcher: {}", e))?;
+    watcher
+        .watch(&root_for_closure, notify::RecursiveMode::Recursive)
+        .map_err(|e| format!("Failed to start watcher: {}", e))?;
+
+    *state.watcher_handle.lock().map_err(|e| e.to_string())? = Some(watcher);
+
+    Ok(())
 }

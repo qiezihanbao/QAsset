@@ -85,7 +85,7 @@ pub fn process_image(
 }
 
 /// Generate thumbnail: resize to 256px max dimension, save as PNG.
-fn generate_thumbnail(
+pub fn generate_thumbnail(
     library_root: &Path,
     relative_path: &str,
     img: &image::DynamicImage,
@@ -635,6 +635,136 @@ pub fn rebuild_folders(conn: &Connection, library_root: &Path) -> Result<(), Str
             .execute(rusqlite::params!["", "", root_name, root_count, show_subfolders])
             .map_err(|e| format!("Failed to insert root folder: {}", e))?;
     }
+
+    Ok(())
+}
+
+/// Process a single file: index it into the database (insert new or update existing).
+/// This is used for file-watcher events where a single file has been added or modified.
+pub fn process_single_file(
+    conn: &Connection,
+    library_root: &Path,
+    abs_path: &Path,
+) -> Result<(), String> {
+    // Get extension and check indexable
+    let ext = match abs_path.extension().and_then(|e| e.to_str()) {
+        Some(e) => e.to_lowercase(),
+        None => return Ok(()), // Skip files without extension
+    };
+
+    if !is_indexable_ext(&ext) {
+        return Ok(());
+    }
+
+    let metadata = match fs::metadata(abs_path) {
+        Ok(m) => m,
+        Err(e) => return Err(format!("Failed to read file metadata: {}", e)),
+    };
+
+    let relative_path = abs_path
+        .strip_prefix(library_root)
+        .unwrap_or(abs_path)
+        .to_string_lossy()
+        .to_string();
+
+    let abs_path_str = abs_path.to_string_lossy().to_string();
+    let id = abs_path_str.clone();
+    let name = abs_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let asset_type = asset_type_for_ext(&ext).to_string();
+    let size = metadata.len();
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Process image-specific metadata
+    let img_result = if asset_type == "image" {
+        Some(process_image(library_root, &relative_path, abs_path))
+    } else {
+        None
+    };
+
+    let (dominant_color, width, height, p_hash, thumbnail_mtime) = match img_result {
+        Some(r) => (
+            r.dominant_color,
+            Some(r.width),
+            Some(r.height),
+            r.p_hash,
+            r.thumbnail_mtime,
+        ),
+        None => (None, None, None, None, None),
+    };
+
+    let now = library::now_secs();
+
+    // Check if asset already exists
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM assets WHERE id = ?1",
+            rusqlite::params![id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .unwrap_or(false);
+
+    if exists {
+        // Update existing asset
+        conn.execute(
+            "UPDATE assets SET name = ?1, path = ?2, size = ?3, modified_at = ?4,
+                asset_type = ?5, dominant_color = ?6, width = ?7, height = ?8,
+                p_hash = ?9, thumbnail_mtime = ?10
+             WHERE id = ?11",
+            rusqlite::params![
+                name,
+                abs_path_str,
+                size as i64,
+                modified,
+                asset_type,
+                dominant_color,
+                width,
+                height,
+                p_hash,
+                thumbnail_mtime,
+                id,
+            ],
+        )
+        .map_err(|e| format!("DB update failed: {}", e))?;
+    } else {
+        // Insert new asset
+        conn.execute(
+            "INSERT INTO assets (id, name, path, relative_path, asset_type, size,
+                dominant_color, tags, description, rating, workspace_ids,
+                created_at, modified_at, p_hash, is_trashed, width, height,
+                source_url, duration, thumbnail_mtime)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]', '', NULL, '[]',
+                ?8, ?9, ?10, 0, ?11, ?12, NULL, NULL, ?13)",
+            rusqlite::params![
+                id,
+                name,
+                abs_path_str,
+                relative_path,
+                asset_type,
+                size as i64,
+                dominant_color,
+                now,
+                modified,
+                p_hash,
+                width,
+                height,
+                thumbnail_mtime,
+            ],
+        )
+        .map_err(|e| format!("DB insert failed: {}", e))?;
+    }
+
+    // Rebuild folder cache to reflect the new/updated asset
+    rebuild_folders(conn, library_root)?;
 
     Ok(())
 }
