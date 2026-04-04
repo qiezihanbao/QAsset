@@ -1,5 +1,5 @@
 import { Image as ImageIcon, FileText, Video, Box, ChevronLeft, ChevronRight, Filter, Grid, List, Search, ChevronDown, Columns, FolderOpen, Trash2, Copy, Edit2, MoveRight, PlusCircle, Tag, Image, Link, Star, HardDrive, Maximize2 } from "lucide-react"
-import { useAssetStore, AssetLite } from "@/store/useAssetStore"
+import { useAssetStore, AssetLite, AssetFilters } from "@/store/useAssetStore"
 import * as ContextMenu from '@radix-ui/react-context-menu'
 import { invoke } from "@tauri-apps/api/core"
 import { convertFileSrc } from "@tauri-apps/api/core"
@@ -489,10 +489,10 @@ export function AssetsPage() {
     : activeView === 'unorganized' ? "待整理文件"
     : "全部文件"
 
-  async function loadFilteredAssets() {
+  useEffect(() => {
     if (!(window as any).__TAURI_INTERNALS__ && !(window as any).__TAURI__) return
 
-    const filters: any = {
+    const filters: Partial<AssetFilters> & { page: number; page_size: number } = {
       sort_field: sortConfig.field,
       sort_order: sortConfig.order,
       page: 1,
@@ -520,51 +520,31 @@ export function AssetsPage() {
       filters.search_query = searchQuery
     }
 
-    try {
-      const result = await invoke('query_assets', { filters }) as any
-      setAssets(result.items as AssetLite[])
-    } catch (e) {
-      console.error('Failed to load filtered assets:', e)
+    const loadData = async () => {
+      try {
+        const result = await invoke('query_assets', { filters }) as any
+        setAssets(result.items as AssetLite[])
+      } catch (e) {
+        console.error('Failed to load filtered assets:', e)
+      }
     }
-  }
 
-  useEffect(() => {
-    loadFilteredAssets()
+    loadData()
   }, [activeView, tagFilter, activeWorkspaceId, typeFilter, searchQuery, sortConfig])
 
   const filteredAssets = assets.filter(asset => {
-    // Basic View Filters
-    if (activeView === 'trash') {
-      if (!asset.is_trashed) return false;
-    } else {
-      if (asset.is_trashed) return false;
-    }
-
     // Similar Search filter (highest priority if active)
     if (similarAssetIds) {
       return similarAssetIds.includes(asset.id);
     }
 
-    // Search filter (name only, since tags/description are in detail)
-    let matchesSearch = true;
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      matchesSearch = asset.name.toLowerCase().includes(q);
-    }
-
-    // Type filter
-    let matchesType = true;
-    if (typeFilter && typeFilter.length > 0) {
-      matchesType = typeFilter.includes(asset.asset_type);
-    }
-
-    // Folder filter
+    // Folder filter (not handled by backend)
     let matchesFolder = true;
     if (folderFilter && folderFilter.length > 0) {
       matchesFolder = folderFilter.some(folder => asset.path.includes(folder));
     }
 
-    // Color filter
+    // Color filter (not handled by backend)
     let matchesColor = true
     if (colorFilter) {
       if (!asset.dominant_color) {
@@ -579,7 +559,7 @@ export function AssetsPage() {
       }
     }
 
-    // Size filter
+    // Size filter (not handled by backend)
     let matchesSize = true
     if (sizeFilter && sizeFilter.length > 0) {
       matchesSize = sizeFilter.some(key => {
@@ -589,13 +569,13 @@ export function AssetsPage() {
       })
     }
 
-    // Rating filter
+    // Rating filter (not handled by backend)
     let matchesRating = true
     if (ratingFilter && ratingFilter.length > 0) {
       matchesRating = ratingFilter.includes(asset.rating || 0)
     }
 
-    // Shape filter
+    // Shape filter (not handled by backend)
     let matchesShape = true
     if (shapeFilter && shapeFilter.length > 0) {
       if (!asset.width || !asset.height) {
@@ -611,7 +591,7 @@ export function AssetsPage() {
       }
     }
 
-    return matchesSearch && matchesType && matchesColor && matchesFolder && matchesSize && matchesRating && matchesShape
+    return matchesFolder && matchesColor && matchesSize && matchesRating && matchesShape
   }).sort((a, b) => {
     const { field, order } = sortConfig
     let comparison = 0
