@@ -50,6 +50,8 @@ pub struct AssetFilters {
     pub min_rating: Option<u8>,
     pub min_size: Option<u64>,
     pub max_size: Option<u64>,
+    pub tags: Option<Vec<String>>,
+    pub unorganized: Option<bool>,
     pub sort_field: String,
     pub sort_order: String,
     pub page: u32,

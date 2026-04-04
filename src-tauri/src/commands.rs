@@ -192,6 +192,20 @@ pub async fn query_assets(
             param_values.push(Box::new(max_s as i64));
         }
 
+        if let Some(ref tags) = filters.tags {
+            if !tags.is_empty() {
+                for tag in tags {
+                    where_clauses.push("tags LIKE ?".to_string());
+                    param_values.push(Box::new(format!("%\"{}\"%", tag)));
+                }
+            }
+        }
+
+        if filters.unorganized == Some(true) {
+            where_clauses.push("(tags IS NULL OR tags = '[]' OR tags = '')".to_string());
+            where_clauses.push("(workspace_ids IS NULL OR workspace_ids = '[]' OR workspace_ids = '')".to_string());
+        }
+
         let where_sql = if where_clauses.is_empty() {
             String::new()
         } else {
