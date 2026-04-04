@@ -481,8 +481,6 @@ export function AssetsPage() {
     }
   }
 
-  // Tags are no longer available on AssetLite; we use an empty list for now.
-  // Tag filtering will need server-side support or a dedicated tag cache.
   const allTags: string[] = []
 
   const activeWorkspaceName = activeView === 'workspace' && activeWorkspaceId
