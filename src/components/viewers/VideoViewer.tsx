@@ -1,5 +1,5 @@
 import { useState, useRef } from "react"
-import { convertFileSrc } from "@tauri-apps/api/core"
+import { convertFileSrc, invoke } from "@tauri-apps/api/core"
 import { RotateCcw } from "lucide-react"
 
 interface VideoViewerProps {
@@ -15,7 +15,8 @@ export function VideoViewer({ filePath, fileName }: VideoViewerProps) {
   const [playbackRate, setPlaybackRate] = useState(1)
   const [isLooping, setIsLooping] = useState(false)
 
-  const src = convertFileSrc(filePath)
+  const isTauri = !!(window as any).__TAURI_INTERNALS__ || !!(window as any).__TAURI__
+  const src = isTauri ? convertFileSrc(filePath) : filePath
 
   const handleError = () => {
     setHasError(true)
@@ -38,7 +39,6 @@ export function VideoViewer({ filePath, fileName }: VideoViewerProps) {
 
   const handleOpenDefault = async () => {
     try {
-      const { invoke } = await import("@tauri-apps/api/core")
       await invoke("open_in_default_app", { path: filePath })
     } catch (e) {
       console.error("Failed to open in default app:", e)
