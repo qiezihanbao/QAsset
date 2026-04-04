@@ -1,5 +1,5 @@
 import { Image as ImageIcon, FileText, Video, Box, ChevronLeft, ChevronRight, Filter, Grid, List, Search, ChevronDown, Columns, FolderOpen, Trash2, Copy, Edit2, MoveRight, PlusCircle, Tag, Image, Link, Star, HardDrive, Maximize2 } from "lucide-react"
-import { useAssetStore } from "@/store/useAssetStore"
+import { useAssetStore, AssetLite } from "@/store/useAssetStore"
 import * as ContextMenu from '@radix-ui/react-context-menu'
 import { invoke } from "@tauri-apps/api/core"
 import { convertFileSrc } from "@tauri-apps/api/core"
@@ -329,7 +329,7 @@ export function AssetsPage() {
     shapeFilter, setShapeFilter,
     activeView, activeWorkspaceId, workspaces, thumbnailSize, setThumbnailSize, layoutMode, setLayoutMode,
     sortConfig, setSortConfig, similarAssetIds, setSimilarAssetIds, setPreviewAsset,
-    removeAsset, updateAssetProperty, assetDetail
+    removeAsset, updateAssetProperty, assetDetail, setAssets
   } = useAssetStore()
 
   const [isColorPickerOpen, setIsColorPickerOpen] = useState(false)
@@ -491,6 +491,49 @@ export function AssetsPage() {
     : activeView === 'unorganized' ? "待整理文件"
     : "全部文件"
 
+  async function loadFilteredAssets() {
+    if (!(window as any).__TAURI_INTERNALS__ && !(window as any).__TAURI__) return
+
+    const filters: any = {
+      sort_field: sortConfig.field,
+      sort_order: sortConfig.order,
+      page: 1,
+      page_size: 10000,
+      is_trashed: activeView === 'trash' ? true : false,
+    }
+
+    if (activeView === 'unorganized') {
+      filters.unorganized = true
+    }
+
+    if (tagFilter && tagFilter.length > 0) {
+      filters.tags = tagFilter
+    }
+
+    if (activeView === 'workspace' && activeWorkspaceId) {
+      filters.workspace_id = activeWorkspaceId
+    }
+
+    if (typeFilter && typeFilter.length > 0) {
+      filters.asset_types = typeFilter
+    }
+
+    if (searchQuery) {
+      filters.search_query = searchQuery
+    }
+
+    try {
+      const result = await invoke('query_assets', { filters }) as any
+      setAssets(result.items as AssetLite[])
+    } catch (e) {
+      console.error('Failed to load filtered assets:', e)
+    }
+  }
+
+  useEffect(() => {
+    loadFilteredAssets()
+  }, [activeView, tagFilter, activeWorkspaceId, typeFilter, searchQuery, sortConfig])
+
   const filteredAssets = assets.filter(asset => {
     // Basic View Filters
     if (activeView === 'trash') {
@@ -499,19 +542,10 @@ export function AssetsPage() {
       if (asset.is_trashed) return false;
     }
 
-    // Note: "unorganized" and "workspace" filters now need server-side support
-    // since AssetLite doesn't carry tags/workspace_ids. For now, show all non-trashed assets.
-    if (activeView === 'unorganized') {
-      // Would need detail data - skip filtering for now
-    }
-
     // Similar Search filter (highest priority if active)
     if (similarAssetIds) {
       return similarAssetIds.includes(asset.id);
     }
-
-    // Workspace filter - needs server-side support
-    // For now, skip workspace filtering on client side
 
     // Search filter (name only, since tags/description are in detail)
     let matchesSearch = true;
@@ -525,9 +559,6 @@ export function AssetsPage() {
     if (typeFilter && typeFilter.length > 0) {
       matchesType = typeFilter.includes(asset.asset_type);
     }
-
-    // Tag filter - would need server-side support
-    // For now, skip tag filtering
 
     // Folder filter
     let matchesFolder = true;

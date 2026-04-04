@@ -79,6 +79,8 @@ export interface AssetFilters {
   min_rating?: number
   min_size?: number
   max_size?: number
+  tags?: string[]
+  unorganized?: boolean
   sort_field: string
   sort_order: string
   page: number
