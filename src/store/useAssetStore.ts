@@ -1,4 +1,5 @@
 import { create } from "zustand"
+import { invoke } from "@tauri-apps/api/core"
 
 export const getSafeArray = (jsonStr: string | string[] | null | undefined): string[] => {
   if (!jsonStr) return []
@@ -141,6 +142,8 @@ interface AssetStore {
   colorFilter: ColorFilter | null
   typeFilter: string[] | null
   tagFilter: string[] | null
+  tagsSummary: Record<string, number>
+  isLoadingTagsSummary: boolean
   folderFilter: string[] | null
   shapeFilter: string[] | null // 'horizontal', 'vertical', 'square'
   ratingFilter: number[] | null
@@ -188,6 +191,7 @@ interface AssetStore {
   setColorFilter: (filter: ColorFilter | null) => void
   setTypeFilter: (filter: string[] | null) => void
   setTagFilter: (filter: string[] | null) => void
+  refreshTagsSummary: () => Promise<void>
   setFolderFilter: (filter: string[] | null) => void
   setShapeFilter: (filter: string[] | null) => void
   setRatingFilter: (filter: number[] | null) => void
@@ -246,6 +250,8 @@ export const useAssetStore = create<AssetStore>((set) => ({
   colorFilter: null,
   typeFilter: null,
   tagFilter: null,
+  tagsSummary: {},
+  isLoadingTagsSummary: false,
   folderFilter: null,
   shapeFilter: null,
   ratingFilter: null,
@@ -341,6 +347,18 @@ export const useAssetStore = create<AssetStore>((set) => ({
   setColorFilter: (filter) => set({ colorFilter: filter }),
   setTypeFilter: (filter) => set({ typeFilter: filter }),
   setTagFilter: (filter) => set({ tagFilter: filter }),
+  refreshTagsSummary: async () => {
+    const isTauri = !!(window.__TAURI_INTERNALS__ || window.__TAURI__)
+    if (!isTauri) return
+    set({ isLoadingTagsSummary: true })
+    try {
+      const counts = await invoke('get_tags_summary') as Record<string, number>
+      set({ tagsSummary: counts, isLoadingTagsSummary: false })
+    } catch (e) {
+      console.error('Failed to refresh tags summary:', e)
+      set({ isLoadingTagsSummary: false })
+    }
+  },
   setFolderFilter: (filter) => set({ folderFilter: filter }),
   setShapeFilter: (filter) => set({ shapeFilter: filter }),
   setRatingFilter: (filter) => set({ ratingFilter: filter }),

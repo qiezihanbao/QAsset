@@ -1,32 +1,15 @@
-import { useState, useEffect } from "react"
-import { invoke } from "@tauri-apps/api/core"
+import { useEffect } from "react"
 import { useAssetStore } from "@/store/useAssetStore"
 
-const isTauri = () => !!(window.__TAURI_INTERNALS__ || window.__TAURI__)
-
 export function TagsView() {
-  const { setActiveView, setTagFilter } = useAssetStore()
-  const [tagCounts, setTagCounts] = useState<Record<string, number>>({})
-  const [isLoading, setIsLoading] = useState(true)
+  const { setActiveView, setTagFilter, tagsSummary, isLoadingTagsSummary, refreshTagsSummary } = useAssetStore()
 
   useEffect(() => {
-    loadTags()
+    // Only fetch if we don't have data yet
+    if (Object.keys(tagsSummary).length === 0) {
+      refreshTagsSummary()
+    }
   }, [])
-
-  async function loadTags() {
-    if (!isTauri()) {
-      setIsLoading(false)
-      return
-    }
-
-    try {
-      const counts = await invoke('get_tags_summary') as Record<string, number>
-      setTagCounts(counts)
-    } catch (e) {
-      console.error('Failed to load tags summary:', e)
-    }
-    setIsLoading(false)
-  }
 
   // Group tags by first letter (Pinyin/English)
   const getFirstChar = (str: string) => {
@@ -36,7 +19,7 @@ export function TagsView() {
   }
 
   const groupedTags: Record<string, Array<{name: string, count: number}>> = {}
-  Object.entries(tagCounts).forEach(([name, count]) => {
+  Object.entries(tagsSummary).forEach(([name, count]) => {
     const group = getFirstChar(name)
     if (!groupedTags[group]) groupedTags[group] = []
     groupedTags[group].push({ name, count })
@@ -50,11 +33,14 @@ export function TagsView() {
     setActiveView('all')
   }
 
-  if (isLoading) {
+  if (isLoadingTagsSummary) {
     return (
       <div className="flex-1 flex flex-col h-full bg-white dark:bg-[#121212] overflow-hidden">
         <div className="flex-1 flex items-center justify-center text-zinc-500">
-          Loading tags...
+          <div className="flex flex-col items-center gap-3">
+            <div className="w-6 h-6 border-2 border-zinc-300 border-t-indigo-500 rounded-full animate-spin" />
+            <span>Loading tags...</span>
+          </div>
         </div>
       </div>
     )
@@ -66,7 +52,7 @@ export function TagsView() {
         <div className="max-w-4xl mx-auto">
           <h2 className="text-2xl font-bold mb-8 text-zinc-900 dark:text-white">全部标签</h2>
 
-          {Object.keys(tagCounts).length === 0 ? (
+          {Object.keys(tagsSummary).length === 0 ? (
             <div className="text-zinc-500 flex flex-col items-center justify-center py-20">
               <p>暂无标签</p>
               <p className="text-sm mt-2">请先在右侧边栏为资产添加标签。</p>

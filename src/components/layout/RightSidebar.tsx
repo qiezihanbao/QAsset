@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react"
-import { ExternalLink, Star, Plus, X } from "lucide-react"
+import { ExternalLink, Star, Plus, X, Check } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import { useAssetStore, getSafeArray } from "@/store/useAssetStore"
 import { isMobile } from "@/lib/utils"
@@ -10,12 +10,13 @@ const hasTauriRuntime = () => Boolean(window.__TAURI_INTERNALS__ || window.__TAU
 export function RightSidebar() {
   const {
     assets, selectedAssets, workspaces, assetDetail, setAssetDetail,
-    updateAssetProperty, setSimilarAssetIds, toggleRightSidebar
+    updateAssetProperty, setSimilarAssetIds, toggleRightSidebar, tagsSummary
   } = useAssetStore()
   const selectedAsset = assets.find((asset) => asset.id === selectedAssets[0]) ?? null
   const [descInput, setDescInput] = useState("")
   const [sourceUrlInput, setSourceUrlInput] = useState("")
   const [tagInput, setTagInput] = useState("")
+  const [showTagPopover, setShowTagPopover] = useState(false)
   const [isSearchingSimilar, setIsSearchingSimilar] = useState(false)
 
   // Fetch asset detail from backend when selection changes
@@ -72,6 +73,12 @@ export function RightSidebar() {
   const detailTags = detail ? getSafeArray(detail.tags) : []
   const detailWorkspaceIds = detail ? getSafeArray(detail.workspace_ids) : []
 
+  // Tag suggestions: all known tags filtered by current input, excluding already-assigned tags
+  const tagSuggestions = Object.keys(tagsSummary)
+    .filter((t) => !detailTags.includes(t))
+    .filter((t) => !tagInput.trim() || t.toLowerCase().includes(tagInput.trim().toLowerCase()))
+    .sort((a, b) => (tagsSummary[b] || 0) - (tagsSummary[a] || 0))
+
   const handleUpdateSourceUrl = async () => {
     if (!detail || sourceUrlInput === (detail.source_url || '')) return
     try {
@@ -121,6 +128,7 @@ export function RightSidebar() {
         const newTags = [...detailTags, tagInput.trim()]
         const newTagsStr = JSON.stringify(newTags)
         setTagInput("")
+        setShowTagPopover(false)
         try {
           await safeInvoke("update_asset", {
             id: selectedAsset.id,
@@ -131,6 +139,23 @@ export function RightSidebar() {
           console.error("Failed to update tags:", err)
         }
       }
+    }
+  }
+
+  const handleAddTagDirect = async (tag: string) => {
+    if (!detail || detailTags.includes(tag)) return
+    const newTags = [...detailTags, tag]
+    const newTagsStr = JSON.stringify(newTags)
+    setTagInput("")
+    setShowTagPopover(false)
+    try {
+      await safeInvoke("update_asset", {
+        id: selectedAsset.id,
+        tags: newTagsStr,
+      })
+      setAssetDetail({ ...detail, tags: newTagsStr })
+    } catch (err) {
+      console.error("Failed to update tags:", err)
     }
   }
 

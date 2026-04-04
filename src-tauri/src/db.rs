@@ -36,7 +36,8 @@ pub fn init_library_db(db_path: &Path) -> SqlResult<()> {
             path TEXT PRIMARY KEY,
             parent_path TEXT,
             display_name TEXT NOT NULL,
-            asset_count INTEGER DEFAULT 0
+            asset_count INTEGER DEFAULT 0,
+            show_subfolders INTEGER DEFAULT 1
         );
         CREATE INDEX IF NOT EXISTS idx_assets_type ON assets(asset_type);
         CREATE INDEX IF NOT EXISTS idx_assets_trashed ON assets(is_trashed);
@@ -47,5 +48,13 @@ pub fn init_library_db(db_path: &Path) -> SqlResult<()> {
         CREATE INDEX IF NOT EXISTS idx_assets_relative_path ON assets(relative_path);
         "
     )?;
+
+    // Migrations
+    {
+        let _ = conn.execute_batch(
+            "ALTER TABLE folders ADD COLUMN show_subfolders INTEGER DEFAULT 1;"
+        );
+    }
+
     Ok(())
 }

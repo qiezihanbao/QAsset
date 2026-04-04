@@ -173,8 +173,33 @@ pub async fn query_assets(
         }
 
         if let Some(ref folder) = filters.folder_path {
-            where_clauses.push("relative_path LIKE ?".to_string());
-            param_values.push(Box::new(format!("{}/%", folder.trim_end_matches('/'))));
+            let folder_clean = folder.trim_end_matches('/').to_string();
+            // Check if this folder has show_subfolders enabled
+            let show_subfolders: bool = {
+                let mut check_stmt = conn.prepare(
+                    "SELECT COALESCE(show_subfolders, 1) FROM folders WHERE path = ?1"
+                ).ok();
+                if let Some(ref mut stmt) = check_stmt {
+                    stmt.query_row(rusqlite::params![folder_clean], |row| {
+                        let v: i32 = row.get(0)?;
+                        Ok(v != 0)
+                    }).unwrap_or(true)
+                } else {
+                    true
+                }
+            };
+
+            if show_subfolders {
+                // Show assets in this folder and all subfolders
+                where_clauses.push("relative_path LIKE ?".to_string());
+                param_values.push(Box::new(format!("{}/%", folder_clean)));
+            } else {
+                // Show only assets directly in this folder (not subfolders)
+                where_clauses.push("(relative_path LIKE ? AND relative_path NOT LIKE ?)".to_string());
+                param_values.push(Box::new(format!("{}/%", folder_clean)));
+                // Exclude deeper paths: anything with another '/' after the folder prefix
+                param_values.push(Box::new(format!("{}/%/%", folder_clean)));
+            }
         }
 
         if let Some(min_r) = filters.min_rating {
@@ -445,7 +470,7 @@ pub async fn get_folders(
         let conn = library::get_db_connection(&db_path)?;
 
         let mut stmt = conn
-            .prepare("SELECT path, parent_path, display_name, asset_count FROM folders ORDER BY path")
+            .prepare("SELECT path, parent_path, display_name, asset_count, COALESCE(show_subfolders, 1) FROM folders ORDER BY path")
             .map_err(|e| e.to_string())?;
 
         let rows = stmt
@@ -454,11 +479,13 @@ pub async fn get_folders(
                 let parent_path: Option<String> = row.get(1)?;
                 let display_name: String = row.get(2)?;
                 let asset_count: i32 = row.get(3)?;
+                let show_subfolders_i32: i32 = row.get(4)?;
                 Ok(serde_json::json!({
                     "path": path,
                     "parent_path": parent_path,
                     "display_name": display_name,
                     "asset_count": asset_count,
+                    "show_subfolders": show_subfolders_i32 != 0,
                 }))
             })
             .map_err(|e| e.to_string())?;

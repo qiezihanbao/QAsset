@@ -34,16 +34,16 @@ fn is_indexable_ext(ext: &str) -> bool {
 }
 
 /// Metadata extracted from processing an image file.
-struct ImageProcessResult {
-    dominant_color: Option<String>,
-    width: u32,
-    height: u32,
-    p_hash: Option<String>,
-    thumbnail_mtime: Option<u64>,
+pub struct ImageProcessResult {
+    pub dominant_color: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    pub p_hash: Option<String>,
+    pub thumbnail_mtime: Option<u64>,
 }
 
 /// Process an image: generate thumbnail, extract color, compute pHash.
-fn process_image(
+pub fn process_image(
     library_root: &Path,
     relative_path: &str,
     abs_path: &Path,
