@@ -36,6 +36,9 @@ pub fn run() {
             commands::open_in_default_app,
             commands::rename_asset,
             commands::read_file_text,
+            commands::set_folder_show_subfolders,
+            commands::migrate_missing_hashes,
+            commands::start_watcher,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
