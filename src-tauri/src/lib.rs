@@ -1,5 +1,5 @@
 mod models;
-mod db;
+pub mod db;
 mod library;
 mod thumbnails;
 mod scanner;
