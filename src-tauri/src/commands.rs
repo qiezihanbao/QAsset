@@ -2,6 +2,7 @@ use crate::models::*;
 use crate::library;
 use tauri::{Manager, State};
 use std::path::PathBuf;
+use image_hasher;
 
 fn get_library_root(state: &State<'_, crate::library::AppState>) -> Result<std::path::PathBuf, String> {
     state.library_root.read().map_err(|e| e.to_string())?
@@ -583,12 +584,54 @@ pub async fn get_workspaces(
 
 #[tauri::command]
 pub async fn find_similar_images(
-    _target_id: String,
-    _threshold: u32,
-    _state: State<'_, crate::library::AppState>,
+    target_id: String,
+    threshold: u32,
+    state: State<'_, crate::library::AppState>,
 ) -> Result<Vec<String>, String> {
-    // img_hash dependency removed; return empty results
-    Ok(Vec::new())
+    let db_path = get_db_path(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        let conn = library::get_db_connection(&db_path)?;
+
+        // Get target hash
+        let target_hash_str: Option<String> = conn.query_row(
+            "SELECT p_hash FROM assets WHERE id = ?1",
+            rusqlite::params![target_id],
+            |row| row.get(0),
+        ).map_err(|e| format!("Target asset not found: {}", e))?;
+
+        let target_hash_b64 = target_hash_str
+            .ok_or_else(|| "Target asset has no perceptual hash".to_string())?;
+
+        let target_hash = image_hasher::ImageHash::<Vec<u8>>::from_base64(&target_hash_b64)
+            .map_err(|e| format!("Failed to decode target hash: {:?}", e))?;
+
+        let threshold_dist = threshold;
+
+        // Query all assets with non-null p_hash
+        let mut stmt = conn.prepare(
+            "SELECT id, p_hash FROM assets WHERE p_hash IS NOT NULL AND id != ?1"
+        ).map_err(|e| format!("Prepare failed: {}", e))?;
+
+        let rows = stmt.query_map(rusqlite::params![target_id], |row| {
+            let id: String = row.get(0)?;
+            let hash_b64: String = row.get(1)?;
+            Ok((id, hash_b64))
+        }).map_err(|e| format!("Query failed: {}", e))?;
+
+        let mut similar_ids = Vec::new();
+        for row in rows {
+            if let Ok((id, hash_b64)) = row {
+                if let Ok(other_hash) = image_hasher::ImageHash::<Vec<u8>>::from_base64(&hash_b64) {
+                    if target_hash.dist(&other_hash) <= threshold_dist {
+                        similar_ids.push(id);
+                    }
+                }
+            }
+        }
+
+        Ok(similar_ids)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
