@@ -74,9 +74,12 @@ fn process_image(
     // Extract dominant color from a tiny version
     result.dominant_color = extract_dominant_color(&img);
 
-    // Compute perceptual hash (skip if img_hash doesn't compile with image 0.25)
-    // For now we skip pHash as img_hash 3.2 depends on image 0.23
-    result.p_hash = None;
+    // Compute perceptual hash
+    let hasher = image_hasher::HasherConfig::new()
+        .hash_alg(image_hasher::HashAlg::Gradient)
+        .to_hasher();
+    let hash = hasher.hash_image(&img);
+    result.p_hash = Some(hash.to_base64());
 
     result
 }
