@@ -121,12 +121,13 @@ CREATE TABLE folders (
 
 ```rust
 pub struct AppState {
-    pub library_root: Mutex<Option<PathBuf>>,
-    pub db_path: Mutex<Option<PathBuf>>,
+    pub library_root: RwLock<Option<PathBuf>>,
+    pub db_path: RwLock<Option<PathBuf>>,
+    pub watcher_handle: Mutex<Option<RecommendedWatcher>>,  // Drop to stop
 }
 ```
 
-Startup: `library_root = None`. User must open or create a library before anything else.
+Startup: `library_root = None`. User must open or create a library before anything else. All asset commands return `Err("No library is currently open")` when no library is loaded. `close_library` drops the watcher handle to stop file watching.
 
 ### Command Inventory
 
@@ -134,9 +135,10 @@ Startup: `library_root = None`. User must open or create a library before anythi
 |---------|---------|-------|
 | `create_library` | Create new library at selected folder | Creates `.quickasset/`, `library.db`, `library.json` |
 | `open_library` | Open existing library | Validates `.quickasset/` exists, loads DB |
-| `close_library` | Close current library | Clears state |
+| `close_library` | Close current library | Clears state, stops watcher |
 | `get_library_info` | Current library metadata | Name, asset count, disk usage |
 | `get_recent_libraries` | Read registry.json | Recent library list |
+| `relocate_library` | Fix paths after folder move | Recalculates id/path from relative_path |
 | `scan_library` | Full/incremental scan | Rayon parallel processing (see below) |
 | `query_assets` | Paginated query | Returns lightweight `AssetInfoLite` (no tags/desc/phash) |
 | `get_asset_detail` | Single asset full info | Includes thumbnail path |
@@ -312,14 +314,281 @@ User selects different library from switcher
 - Existing: `rusqlite`, `image`, `img_hash`, `walkdir`, `notify`
 - No new frontend dependencies needed
 
-## Migration Path
+## Migration from v0.x (Current System)
 
-1. Add `rayon` dependency
+On first launch of the new version:
+
+1. Detect old `<app-data-dir>/assets.db`. If it exists and contains data:
+   - Show a one-time migration dialog: "发现旧版数据，是否将其迁移到新的资源库？"
+   - User chooses a folder (or defaults to the folder that was previously scanned)
+   - Migration process:
+     - Read all rows from old `assets` table
+     - For each row: compute `relative_path` from `path` relative to chosen library root
+     - Decode `thumbnail_base64` → write to `.quickasset/thumbnails/` as WebP
+     - Insert into new `library.db` with the new schema
+     - Copy tags, workspaces (hardcoded) into the new DB's `workspaces` table
+   - Rename old `assets.db` to `assets.db.v0.bak`
+2. If user declines migration, the old DB is left untouched (can be migrated later manually)
+3. `library.json` version field starts at `1`
+
+## Path Convention for `relative_path`
+
+- Always use forward slashes `/` regardless of OS (canonical form)
+- Computed as `pathdiff(library_root, absolute_path)` with `/` separator
+- On Windows: `D:\素材库\项目A\img.png` → `项目A/img.png`
+- On library relocation: `relocate_library(new_root)` command iterates all rows, recalculates `id` and `path` from `relative_path` + new root, updates DB
+
+### `relocate_library` Command
+
+When the user opens a library and `.quickasset/` is found but file paths don't match (library was moved/copied):
+```
+1. Detect mismatch: SELECT path FROM assets LIMIT 1 → check if file exists
+2. If mismatch, prompt user: "资源库已移动，是否更新路径？"
+3. UPDATE all rows: id = new_root + relative_path, path = new_root + relative_path
+4. Update library_root in AppState and registry.json
+```
+
+## Error Handling in Parallel Scan
+
+Each rayon thread returns `Result<ProcessedAsset, ScanError>`:
+```rust
+struct ProcessedAsset {
+    asset: AssetInfo,
+    thumbnail_path: Option<PathBuf>,
+}
+
+struct ScanError {
+    path: String,
+    message: String,
+}
+```
+
+- Individual image failures are accumulated, not fatal
+- After scan completes, return a scan report: `{ added: N, updated: N, deleted: N, errors: Vec<ScanError> }`
+- Frontend shows a notification if errors occurred
+
+## Crate Version Notes
+
+- `image` crate must be upgraded from `0.23.14` to `>= 0.25.x` for WebP encoding support
+- `img_hash` `3.2.0`: `HasherConfig` and `ImageHash` are `Send` + `Sync` safe — verified compatible with rayon
+- Add `rayon = "1.10"` to Cargo.toml
+
+## Asset Protocol Configuration
+
+Tauri v2 asset protocol for thumbnail loading:
+- Import: `import { convertFileSrc } from '@tauri-apps/api/core'`
+- Usage: `convertFileSrc(thumbnailAbsolutePath)` → returns `http://asset.localhost/<encoded-path>`
+- `tauri.conf.json`: maintain `"assetProtocol": { "enable": true, "scope": { "allow": ["**"] } }` — required because library paths are user-chosen and dynamic
+- `capabilities/default.json`: add `"core:asset:default"` permission
+
+Security note: the wildcard scope is acceptable for a local desktop app that manages user's own files. Restricting scope per-library would require dynamic scope management not supported in Tauri v2 static config.
+
+## `query_assets` Filter Specification
+
+### Rust Input Struct
+
+```rust
+#[derive(Serialize, Deserialize)]
+pub struct AssetFilters {
+    pub search_query: Option<String>,      // FTS on name (LIKE %query%)
+    pub asset_types: Option<Vec<String>>,  // IN ('image', 'video', ...)
+    pub is_trashed: Option<bool>,          // WHERE is_trashed = ?
+    pub workspace_id: Option<String>,      // workspace_ids JSON contains ?
+    pub folder_path: Option<String>,       // relative_path LIKE 'folder/%'
+    pub min_rating: Option<u8>,            // rating >= ?
+    pub min_size: Option<u64>,             // size >= ?
+    pub max_size: Option<u64>,             // size <= ?
+    pub sort_field: String,                // created_at | modified_at | name | size | rating
+    pub sort_order: String,                // asc | desc
+    pub page: u32,
+    pub page_size: u32,
+}
+```
+
+### Server-side vs Client-side Filters
+
+| Filter | Where | How |
+|--------|-------|-----|
+| Text search | Server | `WHERE name LIKE '%query%'` |
+| Asset type | Server | `WHERE asset_type IN (...)` |
+| Trash status | Server | `WHERE is_trashed = ?` |
+| Workspace | Server | `WHERE workspace_ids LIKE '%"id"%'` (JSON string search) |
+| Folder | Server | `WHERE relative_path LIKE 'folder/%'` |
+| Rating | Server | `WHERE rating >= ?` |
+| Size range | Server | `WHERE size BETWEEN ? AND ?` |
+| Sort + Pagination | Server | `ORDER BY ... LIMIT ... OFFSET ...` |
+| **Color distance** | Client | Load `dominant_color` from `AssetLite`, compute Euclidean distance |
+| **Shape (aspect ratio)** | Client | Compute from `width`/`height` in `AssetLite` |
+| **Tags** | Client | Parse `tags` JSON from full asset detail (not in lite) |
+
+Color and shape filters remain client-side because SQLite lacks native color distance functions and the logic is trivial in JS. These are applied to the already-loaded `AssetLite[]` in the store.
+
+## Type Definitions
+
+### Rust
+
+```rust
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AssetInfoLite {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub asset_type: String,
+    pub size: u64,
+    pub dominant_color: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub created_at: u64,
+    pub modified_at: u64,
+    pub rating: Option<u8>,
+    pub is_trashed: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AssetDetail {
+    // All AssetInfoLite fields plus:
+    pub relative_path: String,
+    pub tags: Option<String>,
+    pub description: Option<String>,
+    pub workspace_ids: Option<String>,
+    pub p_hash: Option<String>,
+    pub source_url: Option<String>,
+    pub duration: Option<f64>,
+    pub thumbnail_path: Option<String>,  // Absolute path to thumbnail file
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct QueryResult {
+    pub total_count: u32,
+    pub items: Vec<AssetInfoLite>,
+}
+```
+
+### TypeScript
+
+```typescript
+interface AssetLite {
+  id: string
+  name: string
+  path: string
+  asset_type: string
+  size: number
+  dominant_color?: string
+  width?: number
+  height?: number
+  created_at: number
+  modified_at: number
+  rating?: number
+  is_trashed: boolean
+}
+
+interface AssetDetail extends AssetLite {
+  relative_path: string
+  tags?: string
+  description?: string
+  workspace_ids?: string
+  p_hash?: string
+  source_url?: string
+  duration?: number
+  thumbnail_path?: string
+}
+
+interface LibraryInfo {
+  name: string
+  path: string
+  asset_count: number
+  last_opened: number
+}
+
+interface PaginationState {
+  page: number
+  pageSize: number
+  totalCount: number
+  hasMore: boolean
+}
+```
+
+## AppState Concurrency Model
+
+```rust
+pub struct AppState {
+    pub library_root: RwLock<Option<PathBuf>>,  // RwLock: reads >> writes
+    pub db_path: RwLock<Option<PathBuf>>,
+}
+```
+
+- All commands check `library_root.read()` first. If `None`, return `Err("No library is currently open".into())`
+- `create_library`, `open_library`, `close_library` acquire write lock
+- All other commands acquire read lock (non-blocking for concurrent reads)
+- `close_library` also stops the file watcher by dropping the watcher handle (stored separately)
+
+### Watcher Lifecycle
+
+```rust
+pub struct AppState {
+    pub library_root: RwLock<Option<PathBuf>>,
+    pub db_path: RwLock<Option<PathBuf>>,
+    pub watcher_handle: Mutex<Option<RecommendedWatcher>>,  // Drop to stop
+}
+```
+
+- `start_watcher` stores the watcher in `watcher_handle`
+- `close_library` drops the watcher (stops watching)
+- `open_library` starts a new watcher for the new root
+
+## Workspace CRUD Commands
+
+| Command | Purpose |
+|---------|---------|
+| `create_workspace` | INSERT into workspaces table |
+| `update_workspace` | UPDATE name |
+| `delete_workspace` | DELETE, also clear workspace_ids refs in assets |
+| `get_workspaces` | SELECT all from workspaces table |
+
+## Folder Tree Rebuild
+
+On full scan (Phase 4):
+- `DELETE FROM folders` then re-INSERT from file paths (full rebuild)
+- Simple and correct for the scan cadence
+
+On file watcher events:
+- Single file events: increment/decrement `asset_count` on the parent folder
+- No full rebuild needed for small changes
+- If watcher event count exceeds threshold (>50 in rapid succession), trigger a full rebuild
+
+## Scan Progress Reporting
+
+- Backend emits `scan-progress` Tauri event every 100 files processed:
+  ```json
+  { "phase": "discovering" | "processing", "scanned": 1500, "total": 10000 }
+  ```
+- Frontend shows a progress bar in the header area during scan
+- Scan is not cancellable in v1 (can be added later if needed)
+
+## Additional Indexes
+
+```sql
+CREATE INDEX idx_assets_relative_path ON assets(relative_path);
+CREATE INDEX idx_assets_dominant_color ON assets(domininant_color);
+```
+
+The `relative_path` index supports folder filtering. The `dominant_color` index may help future server-side color filtering but is not critical for v1.
+
+## Known Limitation: Similarity Search at Scale
+
+`find_similar_images` with brute-force pHash comparison will be O(n) per query. For 100k assets, a single similarity search scans all rows. Acceptable for occasional use. Future optimization: BK-tree or locality-sensitive hashing for sub-linear lookup.
+
+## Implementation Steps
+
+1. Add `rayon` dependency, upgrade `image` crate to 0.25.x
 2. Create new library management commands (create/open/close)
 3. Redesign `init_db` with new schema + indexes
-4. Redesign `scan_library` with parallel processing
-5. Add `query_assets` paginated command
-6. Move thumbnails from SQLite to disk files
-7. Update frontend store for pagination
-8. Add library switcher UI
-9. Add welcome page
+4. Implement `scan_library` with rayon parallel processing
+5. Implement `query_assets` with `AssetFilters` struct
+6. Move thumbnails from SQLite to disk files (WebP)
+7. Add workspace CRUD commands
+8. Add `relocate_library` for moved libraries
+9. Update frontend store for pagination + library state
+10. Add library switcher UI + welcome page
+11. Add scan progress bar
+12. Data migration tool from v0.x global DB
