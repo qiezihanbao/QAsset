@@ -1,9 +1,17 @@
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useCallback } from "react"
 import { Menu, Target, CheckSquare, Tags, Trash2, Box, Folder, Plus, ChevronRight, ChevronDown, Check, X } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import { useAssetStore, getSafeArray, type AssetLite } from "@/store/useAssetStore"
 import * as ContextMenu from '@radix-ui/react-context-menu'
 import { isMobile } from "@/lib/utils"
+
+interface FolderInfo {
+  path: string
+  parent_path: string | null
+  display_name: string
+  asset_count: number
+  show_subfolders: boolean
+}
 
 export function LeftSidebar() {
   const {
@@ -14,6 +22,7 @@ export function LeftSidebar() {
   const [isAddingWorkspace, setIsAddingWorkspace] = useState(false)
   const [newWorkspaceName, setNewWorkspaceName] = useState("")
   const [showAllWorkspaces, setShowAllWorkspaces] = useState(false)
+  const [folders, setFolders] = useState<FolderInfo[]>([])
   const [visibleShortcuts, setVisibleShortcuts] = useState({
     all: true,
     unorganized: true,
@@ -29,6 +38,24 @@ export function LeftSidebar() {
       }).catch((e) => console.warn('Failed to load workspaces:', e))
     }
   }, [currentLibrary])
+
+  // Load folders from backend via get_folders API
+  const loadFolders = useCallback(() => {
+    if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
+      invoke<FolderInfo[]>('get_folders').then((f) => {
+        setFolders(f)
+      }).catch((e) => console.warn('Failed to load folders:', e))
+    }
+  }, [])
+
+  useEffect(() => {
+    loadFolders()
+  }, [loadFolders, currentLibrary])
+
+  // Reload folders when assets change (e.g. after scan)
+  useEffect(() => {
+    loadFolders()
+  }, [assets.length, loadFolders])
 
   const handleToggleShortcut = (key: keyof typeof visibleShortcuts) => {
     setVisibleShortcuts(prev => ({ ...prev, [key]: !prev[key] }))
@@ -133,56 +160,40 @@ export function LeftSidebar() {
     return () => document.removeEventListener("mousedown", handleClickOutside)
   }, [])
 
-  // Generate Folder Tree from assets paths
+  // Generate Folder Tree from get_folders API
   const renderFolderTree = () => {
-    // 1. Extract unique parent directories from all assets
-    const folderPaths = Array.from(new Set(assets.filter(a => !a.is_trashed).map(a => {
-      const parts = a.path.split(/[\\/]/)
-      parts.pop() // remove file name
-      return parts.join('/')
-    })))
+    // Build hierarchical tree from flat folder list
+    type TreeNode = { path: string; display_name: string; asset_count: number; show_subfolders: boolean; children: TreeNode[] }
+    const nodeMap = new Map<string, TreeNode>()
+    const rootNodes: TreeNode[] = []
 
-    // 2. Build hierarchical tree
-    type TreeNode = { name: string; path: string; children: Record<string, TreeNode>; count: number }
-    const root: TreeNode = { name: 'root', path: '', children: {}, count: 0 }
-
-    folderPaths.forEach(folderPath => {
-      const parts = folderPath.split('/')
-      let current = root
-      let currentPath = ''
-
-      parts.forEach((part) => {
-        if (!part) return
-        currentPath = currentPath ? `${currentPath}/${part}` : part
-        if (!current.children[part]) {
-          current.children[part] = { name: part, path: currentPath, children: {}, count: 0 }
-        }
-        current = current.children[part]
+    // Create nodes
+    for (const f of folders) {
+      nodeMap.set(f.path, {
+        path: f.path,
+        display_name: f.display_name,
+        asset_count: f.asset_count,
+        show_subfolders: f.show_subfolders,
+        children: [],
       })
-    })
+    }
 
-    // 3. Count assets for each node
-    assets.filter(a => !a.is_trashed).forEach(a => {
-      const parts = a.path.split(/[\\/]/)
-      parts.pop()
-      const folderPath = parts.join('/')
-
-      const folderParts = folderPath.split('/')
-      let current = root
-      folderParts.forEach(part => {
-        if (!part) return
-        if (current.children[part]) {
-          current.children[part].count++
-          current = current.children[part]
-        }
-      })
-    })
+    // Build parent-child relationships
+    for (const f of folders) {
+      const node = nodeMap.get(f.path)!
+      const parentPath = f.parent_path
+      if (parentPath && nodeMap.has(parentPath)) {
+        nodeMap.get(parentPath)!.children.push(node)
+      } else {
+        rootNodes.push(node)
+      }
+    }
 
     // Recursive component to render tree
-    const FolderNode = ({ node, level = 0 }: { node: TreeNode, level?: number }) => {
+    const FolderNodeComponent = ({ node, level = 0 }: { node: TreeNode; level?: number }) => {
       const [isExpanded, setIsExpanded] = useState(true)
       const { folderFilter, setFolderFilter } = useAssetStore()
-      const hasChildren = Object.keys(node.children).length > 0
+      const hasChildren = node.children.length > 0
 
       const isSelected = folderFilter?.includes(node.path)
 
@@ -192,46 +203,82 @@ export function LeftSidebar() {
           setFolderFilter(null)
         } else {
           setFolderFilter([node.path])
-          useAssetStore.getState().setActiveView('all') // Switch to all view to see folder results
+          useAssetStore.getState().setActiveView('all')
+        }
+      }
+
+      const handleToggleShowSubfolders = async (newVal: boolean) => {
+        if (!(window.__TAURI_INTERNALS__ || window.__TAURI__)) return
+        try {
+          await invoke('update_folder_show_subfolders', {
+            folderPath: node.path,
+            showSubfolders: newVal,
+          })
+          // Update local state
+          setFolders(prev => prev.map(f =>
+            f.path === node.path ? { ...f, show_subfolders: newVal } : f
+          ))
+        } catch (e) {
+          console.error('Failed to toggle show_subfolders:', e)
         }
       }
 
       return (
         <div className="w-full">
-          <div className="flex items-center">
-            <button
-              onClick={() => {
-                if (hasChildren) setIsExpanded(!isExpanded)
-              }}
-              className="p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
-              style={{ marginLeft: `${level * 12}px` }}
-            >
-              {hasChildren ? (
-                isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />
-              ) : (
-                <div className="w-3.5 h-3.5" /> // spacer
-              )}
-            </button>
-            <button
-              onClick={handleFolderClick}
-              className={`flex-1 flex items-center justify-between px-1 py-1.5 rounded-md text-[13px] font-medium transition-colors ${
-                isSelected
-                  ? "bg-indigo-100 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300"
-                  : "text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/40 dark:hover:bg-zinc-800/50 hover:text-zinc-900 dark:hover:text-zinc-50"
-              }`}
-            >
-              <div className="flex items-center gap-1.5 overflow-hidden">
-                <Folder className="w-3.5 h-3.5 opacity-70 shrink-0" />
-                <span className="truncate">{node.name}</span>
+          <ContextMenu.Root>
+            <ContextMenu.Trigger>
+              <div className="flex items-center">
+                <button
+                  onClick={() => {
+                    if (hasChildren) setIsExpanded(!isExpanded)
+                  }}
+                  className="p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+                  style={{ marginLeft: `${level * 12}px` }}
+                >
+                  {hasChildren ? (
+                    isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />
+                  ) : (
+                    <div className="w-3.5 h-3.5" />
+                  )}
+                </button>
+                <button
+                  onClick={handleFolderClick}
+                  className={`flex-1 flex items-center justify-between px-1 py-1.5 rounded-md text-[13px] font-medium transition-colors ${
+                    isSelected
+                      ? "bg-indigo-100 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300"
+                      : "text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/40 dark:hover:bg-zinc-800/50 hover:text-zinc-900 dark:hover:text-zinc-50"
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5 overflow-hidden">
+                    <Folder className="w-3.5 h-3.5 opacity-70 shrink-0" />
+                    <span className="truncate">{node.display_name}</span>
+                  </div>
+                  {node.asset_count > 0 && <span className="text-xs opacity-60 shrink-0 px-1">{node.asset_count}</span>}
+                </button>
               </div>
-              {node.count > 0 && <span className="text-xs opacity-60 shrink-0 px-1">{node.count}</span>}
-            </button>
-          </div>
+            </ContextMenu.Trigger>
+            <ContextMenu.Portal>
+              <ContextMenu.Content
+                className="min-w-[180px] bg-white dark:bg-zinc-900 rounded-md overflow-hidden p-1 shadow-[0px_10px_38px_-10px_rgba(22,_23,_24,_0.35),_0px_10px_20px_-15px_rgba(22,_23,_24,_0.2)] border border-zinc-200 dark:border-zinc-800 animate-in fade-in-80 z-50"
+              >
+                <ContextMenu.CheckboxItem
+                  checked={node.show_subfolders}
+                  onCheckedChange={(checked) => handleToggleShowSubfolders(checked === true)}
+                  className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 pl-8 pr-2 relative select-none outline-none hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
+                >
+                  <ContextMenu.ItemIndicator className="absolute left-2 inline-flex items-center justify-center">
+                    <Check className="w-4 h-4" />
+                  </ContextMenu.ItemIndicator>
+                  显示子文件夹内容
+                </ContextMenu.CheckboxItem>
+              </ContextMenu.Content>
+            </ContextMenu.Portal>
+          </ContextMenu.Root>
 
           {isExpanded && hasChildren && (
             <div className="flex flex-col w-full">
-              {Object.values(node.children).map(child => (
-                <FolderNode key={child.path} node={child} level={level + 1} />
+              {node.children.map(child => (
+                <FolderNodeComponent key={child.path} node={child} level={level + 1} />
               ))}
             </div>
           )}
@@ -241,14 +288,12 @@ export function LeftSidebar() {
 
     return (
       <div className="space-y-0.5">
-        {Object.values(root.children).map(child => (
-          <FolderNode key={child.path} node={child} />
+        {rootNodes.map(child => (
+          <FolderNodeComponent key={child.path} node={child} />
         ))}
       </div>
     )
   }
-
-  const folderTree: Record<string, boolean> = assets.filter(a => !a.is_trashed).length > 0 ? { hasFolders: true } : {}
 
   const handleImport = async () => {
     setIsMenuOpen(false)
@@ -497,7 +542,7 @@ export function LeftSidebar() {
         <div className="pb-6">
           <h3 className="text-[11px] font-semibold text-zinc-400 mb-2 px-2">物理文件夹</h3>
           <nav className="space-y-0.5">
-            {Object.keys(folderTree).length > 0 ? (
+            {folders.length > 0 ? (
               renderFolderTree()
             ) : (
               <div className="px-2 text-xs text-zinc-500 italic">暂无本地文件夹</div>

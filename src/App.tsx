@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useState, useRef } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import { MainLayout } from "@/components/layout/MainLayout"
@@ -18,6 +18,8 @@ function App() {
   } = useAssetStore()
 
   const [isInitialized, setIsInitialized] = useState(false)
+  const [migrateProgress, setMigrateProgress] = useState<{ migrated: number; total: number } | null>(null)
+  const fsEventTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     initApp()
@@ -50,6 +52,16 @@ function App() {
       const config = await invoke<LibraryConfig>('open_library_cmd', { path })
       setCurrentLibrary(config, path)
       await loadAssets()
+
+      // Start file watcher for this library
+      try {
+        await invoke('start_watcher')
+      } catch (e) {
+        console.warn('Failed to start file watcher:', e)
+      }
+
+      // Check for images that need hash migration and run in background
+      runHashMigrationIfNeeded()
     } catch (e) {
       console.error('Failed to open library:', e)
     }
@@ -74,6 +86,29 @@ function App() {
       })
     } catch (e) {
       console.error('Failed to load assets:', e)
+    }
+  }
+
+  async function runHashMigrationIfNeeded() {
+    if (!(window.__TAURI_INTERNALS__ || window.__TAURI__)) return
+    try {
+      const count = await invoke<number>('migrate_hashed')
+      if (count > 0) {
+        console.log(`Hash migration completed: ${count} images processed`)
+        // Reload assets to pick up new hashes/width/height/dominant_color
+        await loadAssets()
+      }
+    } catch (e) {
+      console.warn('Hash migration failed or was not needed:', e)
+    }
+  }
+
+  // Lightweight refresh: only reload the asset list (no full scan)
+  async function lightweightRefresh() {
+    try {
+      await loadAssets()
+    } catch (e) {
+      console.error('Lightweight refresh failed:', e)
     }
   }
 
@@ -113,6 +148,7 @@ function App() {
     // File Drop Handler
     let unlistenDrop: (() => void) | undefined;
     let unlistenFs: (() => void) | undefined;
+    let unlistenMigrate: (() => void) | undefined;
 
     if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
       try {
@@ -122,7 +158,7 @@ function App() {
             console.log('Files dropped:', filePaths);
             try {
               await invoke("scan_library");
-              await (window as any).__loadAssets?.();
+              await loadAssets();
               alert("拖拽导入完成！");
             } catch (err) {
               console.error("Drop import failed:", err);
@@ -130,27 +166,30 @@ function App() {
           }
         }).then(u => unlistenDrop = u);
 
-        // File System Hot Reload Listener
-        listen('fs-event', async (event: any) => {
-          console.log('Hot reload FS event received:', event.payload);
-          const payload = event.payload as { event_type: string, path: string };
-
-          if (payload.event_type === 'create' || payload.event_type === 'modify') {
-             try {
-               await invoke("scan_library");
-               await (window as any).__loadAssets?.();
-             } catch (e) {
-               console.error("Hot reload rescan failed", e);
-             }
-          } else if (payload.event_type === 'remove') {
-             try {
-               await invoke("delete_assets", { ids: [payload.path] });
-               useAssetStore.getState().removeAsset(payload.path);
-             } catch (e) {
-               console.error("Hot reload delete failed", e);
-             }
+        // File System watcher events: backend already updates DB, frontend just refreshes
+        listen('fs-event', async () => {
+          if (fsEventTimerRef.current) {
+            clearTimeout(fsEventTimerRef.current)
           }
+          fsEventTimerRef.current = setTimeout(async () => {
+            fsEventTimerRef.current = null
+            try {
+              await lightweightRefresh()
+            } catch (e) {
+              console.error("Lightweight refresh failed", e)
+            }
+          }, 500)
         }).then(u => unlistenFs = u);
+
+        // Hash migration progress listener
+        listen('migrate-progress', (event: any) => {
+          const payload = event.payload as { migrated: number; total: number }
+          setMigrateProgress(payload)
+          // Clear progress when done
+          if (payload.migrated >= payload.total) {
+            setTimeout(() => setMigrateProgress(null), 2000)
+          }
+        }).then(u => unlistenMigrate = u);
 
       } catch (e) {
         console.warn("Tauri listeners failed to attach.", e);
@@ -163,6 +202,10 @@ function App() {
       window.removeEventListener('keydown', handleKeyDown);
       if (unlistenDrop) unlistenDrop();
       if (unlistenFs) unlistenFs();
+      if (unlistenMigrate) unlistenMigrate();
+      if (fsEventTimerRef.current) {
+        clearTimeout(fsEventTimerRef.current)
+      }
     }
   }, []);
 
@@ -190,6 +233,28 @@ function App() {
         </main>
         {isRightSidebarVisible && <RightSidebar />}
       </div>
+
+      {/* Hash Migration Progress Bar */}
+      {migrateProgress && migrateProgress.total > 0 && (
+        <div className="fixed bottom-0 left-0 right-0 z-50 px-4 pb-4">
+          <div className="max-w-md mx-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg p-3">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                Migrating image hashes...
+              </span>
+              <span className="text-xs text-zinc-500">
+                {migrateProgress.migrated}/{migrateProgress.total}
+              </span>
+            </div>
+            <div className="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-1.5">
+              <div
+                className="bg-indigo-500 h-1.5 rounded-full transition-all duration-300"
+                style={{ width: `${(migrateProgress.migrated / migrateProgress.total) * 100}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </MainLayout>
   )
 }
