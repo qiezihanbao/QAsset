@@ -135,6 +135,7 @@ export function RightSidebar() {
             tags: newTagsStr,
           })
           setAssetDetail({ ...detail, tags: newTagsStr })
+          useAssetStore.getState().refreshTagsSummary()
         } catch (err) {
           console.error("Failed to update tags:", err)
         }
@@ -154,6 +155,7 @@ export function RightSidebar() {
         tags: newTagsStr,
       })
       setAssetDetail({ ...detail, tags: newTagsStr })
+      useAssetStore.getState().refreshTagsSummary()
     } catch (err) {
       console.error("Failed to update tags:", err)
     }
@@ -169,6 +171,7 @@ export function RightSidebar() {
         tags: newTagsStr,
       })
       setAssetDetail({ ...detail, tags: newTagsStr || undefined })
+      useAssetStore.getState().refreshTagsSummary()
     } catch (error) {
       console.error("Failed to update tags:", error)
     }
