@@ -296,16 +296,43 @@ export function RightSidebar() {
                     </span>
                   ))}
                 </div>
-                <div className="relative flex items-center">
-                  <Plus className="w-3.5 h-3.5 absolute left-2 text-zinc-400" />
-                  <input
-                    type="text"
-                    value={tagInput}
-                    onChange={(e) => setTagInput(e.target.value)}
-                    onKeyDown={handleAddTag}
-                    placeholder="输入标签后按回车"
-                    className="w-full pl-7 pr-3 py-1.5 bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-md text-[13px] focus:outline-none focus:border-indigo-500 transition-colors"
-                  />
+                <div className="relative">
+                  <div className="flex items-center">
+                    <Plus className="w-3.5 h-3.5 absolute left-2 text-zinc-400" />
+                    <input
+                      type="text"
+                      value={tagInput}
+                      onChange={(e) => {
+                        setTagInput(e.target.value)
+                        setShowTagPopover(true)
+                      }}
+                      onFocus={() => setShowTagPopover(true)}
+                      onBlur={() => {
+                        // Delay to allow click on suggestion items
+                        setTimeout(() => setShowTagPopover(false), 150)
+                      }}
+                      onKeyDown={handleAddTag}
+                      placeholder="输入标签后按回车"
+                      className="w-full pl-7 pr-3 py-1.5 bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-md text-[13px] focus:outline-none focus:border-indigo-500 transition-colors"
+                    />
+                  </div>
+                  {showTagPopover && tagSuggestions.length > 0 && (
+                    <div className="absolute z-50 left-0 right-0 mt-1 max-h-40 overflow-y-auto rounded-md border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-lg">
+                      {tagSuggestions.slice(0, 8).map((suggestion) => (
+                        <button
+                          key={suggestion}
+                          onMouseDown={(e) => {
+                            e.preventDefault()
+                            handleAddTagDirect(suggestion)
+                          }}
+                          className="w-full flex items-center justify-between px-3 py-1.5 text-[13px] text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+                        >
+                          <span>{suggestion}</span>
+                          <span className="text-[11px] text-zinc-400">{tagsSummary[suggestion]}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 

@@ -541,7 +541,28 @@ fn phase2_diff<'a>(
 }
 
 /// Rebuild the folder cache table from the assets in the DB.
-fn rebuild_folders(conn: &Connection, library_root: &Path) -> Result<(), String> {
+/// Preserves existing `show_subfolders` values for folders that already exist.
+pub fn rebuild_folders(conn: &Connection, library_root: &Path) -> Result<(), String> {
+    // Read existing show_subfolders values before clearing
+    let mut existing_subfolders: HashMap<String, bool> = HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT path, show_subfolders FROM folders")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                let path: String = row.get(0)?;
+                let show: i64 = row.get(1).unwrap_or(1);
+                Ok((path, show != 0))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            if let Ok((path, show)) = row {
+                existing_subfolders.insert(path, show);
+            }
+        }
+    }
+
     // Clear existing folder cache
     conn.execute("DELETE FROM folders", [])
         .map_err(|e| format!("Failed to clear folders: {}", e))?;
@@ -575,10 +596,10 @@ fn rebuild_folders(conn: &Connection, library_root: &Path) -> Result<(), String>
         }
     }
 
-    // Insert into folders table
+    // Insert into folders table, preserving show_subfolders
     let mut insert_stmt = conn
         .prepare(
-            "INSERT OR REPLACE INTO folders (path, parent_path, display_name, asset_count) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT OR REPLACE INTO folders (path, parent_path, display_name, asset_count, show_subfolders) VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .map_err(|e| e.to_string())?;
 
@@ -594,8 +615,11 @@ fn rebuild_folders(conn: &Connection, library_root: &Path) -> Result<(), String>
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
 
+        // Preserve existing show_subfolders value, default to true (1)
+        let show_subfolders: bool = existing_subfolders.get(folder).copied().unwrap_or(true);
+
         insert_stmt
-            .execute(rusqlite::params![folder, parent_path, display_name, count])
+            .execute(rusqlite::params![folder, parent_path, display_name, count, show_subfolders])
             .map_err(|e| format!("Failed to insert folder: {}", e))?;
     }
 
@@ -606,8 +630,9 @@ fn rebuild_folders(conn: &Connection, library_root: &Path) -> Result<(), String>
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
+        let show_subfolders: bool = existing_subfolders.get("").copied().unwrap_or(true);
         insert_stmt
-            .execute(rusqlite::params!["", "", root_name, root_count])
+            .execute(rusqlite::params!["", "", root_name, root_count, show_subfolders])
             .map_err(|e| format!("Failed to insert root folder: {}", e))?;
     }
 
