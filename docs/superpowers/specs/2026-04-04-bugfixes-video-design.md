@@ -14,7 +14,7 @@ Perceptual hashing was disabled during the library system migration because `img
 
 ### Solution
 
-Use `image_hasher` v3.1.1 which requires `image >=0.25, <0.26`.
+Use `image_hasher` v3.1.0 which requires `image >=0.25, <0.26`.
 
 ### Changes
 
@@ -40,6 +40,7 @@ Use `image_hasher` v3.1.1 which requires `image >=0.25, <0.26`.
 - pHash computation runs in the rayon parallel pipeline (Phase 3 of scanner)
 - Base64 encoding matches the existing `p_hash` column type (TEXT)
 - `find_similar_images` runs in `spawn_blocking` for DB access
+- Existing assets scanned before this change will have `NULL` p_hash and will be excluded from similarity search until re-scanned
 
 ## 2. Tag + Workspace Server-Side Filtering
 
@@ -57,24 +58,27 @@ Add tag filtering to the backend SQL builder and wire the frontend to pass filte
 - Add field: `tags: Option<Vec<String>>`
 
 **src-tauri/src/commands.rs** (`query_assets`):
-- In the SQL WHERE clause builder, after existing filters, add tag filter logic:
-  ```
+- In the SQL WHERE clause builder, add tag filter using parameterized queries (consistent with existing filters):
+  ```rust
   if let Some(tags) = &filters.tags {
       for tag in tags {
-          conditions.push(format!("tags LIKE '%\"{}\"%'", tag.replace('\'', "''")));
+          conditions.push("tags LIKE ?".to_string());
+          param_values.push(Box::new(format!("%\"{}\"%", tag)));
       }
   }
   ```
-- Note: tags are stored as JSON arrays (e.g., `["tag1","tag2"]`), so `LIKE '%"tagname"%'` matches correctly. SQL injection is prevented by escaping single quotes in tag names.
+- Tags are stored as JSON arrays (e.g., `["tag1","tag2"]`), so `LIKE '%"tagname"%'` matches correctly. Parameterized queries prevent SQL injection.
 
 **src/store/useAssetStore.ts** (`AssetFilters` interface):
 - Add field: `tags?: string[]`
 
 **src/pages/AssetsPage.tsx**:
-- When `tagFilter` state is non-empty, pass `tags: tagFilter` in the `query_assets` filters object
+- Add a `loadFilteredAssets()` function that calls `query_assets` directly with the current filters from the store (tags, workspace_id, unorganized, etc.) instead of relying on `__loadAssets`
+- When `tagFilter` state is non-empty, pass `tags: tagFilter` in the filters
 - When `workspaceFilter` is set, pass `workspace_id: workspaceFilter` in the filters
-- Remove the commented-out client-side tag/workspace filtering blocks
-- Re-query from backend when tag or workspace filter changes (add to filter dependency array)
+- When `activeView === 'unorganized'`, pass `unorganized: true`
+- Call `loadFilteredAssets()` in a `useEffect` that depends on `tagFilter`, `workspaceFilter`, and `activeView`
+- Remove the inline comments about skipping tag/workspace filtering
 
 ### Constraints
 
@@ -136,8 +140,7 @@ Add a `VideoViewer` component using HTML5 `<video>` with Tauri's `convertFileSrc
 
 **src/components/viewers/getViewerType.ts**:
 - Add `'video'` to `ViewerType` union
-- Add video extension set: `mp4`, `avi`, `mov`, `mkv`, `webm`, `flv`, `wmv`
-- Add detection: if extension is video, return `'video'`
+- Add detection: check `assetType === 'video'` (consistent with how image/vector types are detected via `assetType`), rather than duplicating the extension list
 - Place video check before the fallback `'unsupported'` return
 
 **src/components/viewers/VideoViewer.tsx** (new file):
@@ -148,11 +151,11 @@ interface VideoViewerProps {
 }
 ```
 - Render `<video>` element with `src={convertFileSrc(filePath)}`
-- Attributes: `controls`, `autoPlay`, `className="w-full h-full object-contain"`
-- Playback controls: play/pause, seek, volume, fullscreen (native browser controls)
-- Playback rate selector (0.5x, 1x, 1.5x, 2x) via custom overlay or native controls
+- Attributes: `controls`, `className="w-full h-full object-contain"`. No `autoPlay` — user must click play to avoid jarring behavior when navigating between videos.
+- Playback controls: play/pause, seek, volume, fullscreen (native browser `<video>` controls)
+- Playback rate selector (0.5x, 1x, 1.5x, 2x) via a small custom overlay button in the top-right corner
 - Handle unsupported format: listen for `<video>` error event, show error message + "open in default app" button
-- Loop toggle button
+- Loop toggle button in the custom overlay
 
 **src/components/Lightbox.tsx**:
 - Add `'video'` case to `renderViewer()` switch:
