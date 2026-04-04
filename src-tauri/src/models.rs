@@ -81,7 +81,7 @@ pub struct Registry {
     pub recent_libraries: Vec<RegistryEntry>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ScanProgress {
     pub phase: String,
     pub scanned: u32,

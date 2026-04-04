@@ -31,9 +31,9 @@ rayon = "1.10"
 sha2 = "0.10"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
-img_hash = "3.2.0"
 notify = "6.1.1"
 open = "5.3.3"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3.10"

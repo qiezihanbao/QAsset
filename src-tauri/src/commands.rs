@@ -117,10 +117,15 @@ pub async fn relocate_library(
 
 #[tauri::command]
 pub async fn scan_library(
-    _state: State<'_, crate::library::AppState>,
-    _app_handle: tauri::AppHandle,
+    state: State<'_, crate::library::AppState>,
+    app_handle: tauri::AppHandle,
 ) -> Result<ScanReport, String> {
-    Err("Not implemented".into())
+    let root = get_library_root(&state)?;
+    let db_path = get_db_path(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        crate::scanner::scan_library(&root, &db_path, &app_handle)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -181,34 +186,90 @@ pub async fn get_tags_summary(
 
 #[tauri::command]
 pub async fn create_workspace(
-    _name: String,
-    _state: State<'_, crate::library::AppState>,
+    name: String,
+    state: State<'_, crate::library::AppState>,
 ) -> Result<serde_json::Value, String> {
-    Err("Not implemented".into())
+    let db_path = get_db_path(&state)?;
+    let conn = library::get_db_connection(&db_path)?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let created_at = library::now_secs();
+
+    conn.execute(
+        "INSERT INTO workspaces (id, name, created_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![id, name, created_at],
+    ).map_err(|e| format!("Failed to create workspace: {}", e))?;
+
+    Ok(serde_json::json!({
+        "id": id,
+        "name": name,
+        "created_at": created_at,
+    }))
 }
 
 #[tauri::command]
 pub async fn update_workspace(
-    _id: String,
-    _name: String,
-    _state: State<'_, crate::library::AppState>,
+    id: String,
+    name: String,
+    state: State<'_, crate::library::AppState>,
 ) -> Result<(), String> {
-    Err("Not implemented".into())
+    let db_path = get_db_path(&state)?;
+    let conn = library::get_db_connection(&db_path)?;
+
+    conn.execute(
+        "UPDATE workspaces SET name = ?1 WHERE id = ?2",
+        rusqlite::params![name, id],
+    ).map_err(|e| format!("Failed to update workspace: {}", e))?;
+
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn delete_workspace(
-    _id: String,
-    _state: State<'_, crate::library::AppState>,
+    id: String,
+    state: State<'_, crate::library::AppState>,
 ) -> Result<(), String> {
-    Err("Not implemented".into())
+    let db_path = get_db_path(&state)?;
+    let conn = library::get_db_connection(&db_path)?;
+
+    conn.execute(
+        "DELETE FROM workspaces WHERE id = ?1",
+        rusqlite::params![id],
+    ).map_err(|e| format!("Failed to delete workspace: {}", e))?;
+
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn get_workspaces(
-    _state: State<'_, crate::library::AppState>,
+    state: State<'_, crate::library::AppState>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    Err("Not implemented".into())
+    let db_path = get_db_path(&state)?;
+    let conn = library::get_db_connection(&db_path)?;
+
+    let mut stmt = conn
+        .prepare("SELECT id, name, created_at FROM workspaces ORDER BY created_at")
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let created_at: u64 = row.get(2)?;
+            Ok(serde_json::json!({
+                "id": id,
+                "name": name,
+                "created_at": created_at,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut workspaces = Vec::new();
+    for row in rows {
+        workspaces.push(row.map_err(|e: rusqlite::Error| e.to_string())?);
+    }
+
+    Ok(workspaces)
 }
 
 #[tauri::command]

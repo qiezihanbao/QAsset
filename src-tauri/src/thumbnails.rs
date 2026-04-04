@@ -5,7 +5,7 @@ pub fn thumbnail_relative_path(relative_path: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(relative_path.as_bytes());
     let hash = format!("{:x}", hasher.finalize());
-    format!("{}/{}.webp", &hash[..2], &hash[2..14])
+    format!("{}/{}.png", &hash[..2], &hash[2..14])
 }
 
 pub fn thumbnail_abs_path(library_root: &Path, relative_path: &str) -> PathBuf {
