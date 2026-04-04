@@ -11,27 +11,85 @@ export const getSafeArray = (jsonStr: string | string[] | null | undefined): str
   }
 }
 
-export interface Asset {
+// ─── New type definitions for library system ─────────────────────────
+
+export interface AssetLite {
   id: string
   name: string
   path: string
   asset_type: string
   size: number
   dominant_color?: string
-  thumbnail_base64?: string
-  workspace_ids?: string // JSON string array from backend
-  tags?: string // JSON string array
+  width?: number
+  height?: number
+  created_at: number
+  modified_at: number
+  rating?: number
+  is_trashed: boolean
+}
+
+export interface AssetDetail {
+  id: string
+  name: string
+  path: string
+  relative_path: string
+  asset_type: string
+  size: number
+  dominant_color?: string
+  tags?: string
   description?: string
   rating?: number
-  created_at?: number
-  modified_at?: number
-  is_missing?: boolean
-  is_trashed?: boolean
+  workspace_ids?: string
+  created_at: number
+  modified_at: number
+  p_hash?: string
+  is_trashed: boolean
   width?: number
   height?: number
   source_url?: string
   duration?: number
+  thumbnail_path?: string
 }
+
+export interface LibraryConfig {
+  name: string
+  version: number
+  created_at: number
+}
+
+export interface RegistryEntry {
+  path: string
+  name: string
+  last_opened: number
+}
+
+export interface PaginationState {
+  page: number
+  pageSize: number
+  totalCount: number
+  hasMore: boolean
+}
+
+export interface AssetFilters {
+  search_query?: string
+  asset_types?: string[]
+  is_trashed?: boolean
+  workspace_id?: string
+  folder_path?: string
+  min_rating?: number
+  min_size?: number
+  max_size?: number
+  sort_field: string
+  sort_order: string
+  page: number
+  page_size: number
+}
+
+// ─── Legacy type alias for backward compatibility ────────────────────
+// Existing components that import `Asset` will resolve to AssetLite.
+export type Asset = AssetLite
+
+// ─── Existing shared types ───────────────────────────────────────────
 
 export interface Workspace {
   id: string
@@ -50,13 +108,33 @@ export interface ColorFilter {
   exact: boolean;
 }
 
+// ─── Store interface ─────────────────────────────────────────────────
+
 interface AssetStore {
-  assets: Asset[]
+  // Assets (lightweight list for grid/list views)
+  assets: AssetLite[]
+  // Full detail for the currently-selected asset
+  assetDetail: AssetDetail | null
+
+  // Library state
+  currentLibrary: LibraryConfig | null
+  currentLibraryPath: string | null
+  recentLibraries: RegistryEntry[]
+  isLoadingLibrary: boolean
+
+  // Pagination
+  pagination: PaginationState
+
+  // Workspaces
   workspaces: Workspace[]
+
+  // Selection & preview
   selectedAssets: string[]
+  previewAsset: AssetLite | null
+  isFullscreenPreview: boolean
+
+  // Search & filters
   searchQuery: string
-  
-  // Advanced Filters
   keywordFilter: string
   colorFilter: ColorFilter | null
   typeFilter: string[] | null
@@ -66,7 +144,8 @@ interface AssetStore {
   ratingFilter: number[] | null
   sizeFilter: string[] | null
   durationFilter: string[] | null
-  
+
+  // View & UI preferences
   activeView: ViewType
   activeWorkspaceId: string | null
   isLeftSidebarVisible: boolean
@@ -75,20 +154,32 @@ interface AssetStore {
   layoutMode: "grid" | "masonry"
   sortConfig: SortConfig
   similarAssetIds: string[] | null
-  previewAsset: Asset | null
-  isFullscreenPreview: boolean
-  setAssets: (assets: Asset[]) => void
+
+  // ── Actions: Assets ──────────────────────────────────────────────
+  setAssets: (assets: AssetLite[]) => void
+  appendAssets: (items: AssetLite[]) => void
+  setAssetDetail: (detail: AssetDetail | null) => void
+  updateAssetProperty: (assetId: string, updates: Partial<AssetLite>) => void
+  removeAsset: (assetId: string) => void
+
+  // ── Actions: Library ─────────────────────────────────────────────
+  setCurrentLibrary: (lib: LibraryConfig | null, path: string | null) => void
+  setRecentLibraries: (libs: RegistryEntry[]) => void
+  setIsLoadingLibrary: (loading: boolean) => void
+  setPagination: (p: Partial<PaginationState>) => void
+  resetForNewLibrary: () => void
+
+  // ── Actions: Workspaces ──────────────────────────────────────────
   addWorkspace: (name: string) => void
-  setActiveView: (view: ViewType, workspaceId?: string | null) => void
-  setLeftSidebarVisible: (visible: boolean) => void
-  setRightSidebarVisible: (visible: boolean) => void
-  toggleLeftSidebar: () => void
-  toggleRightSidebar: () => void
   assignAssetToWorkspace: (assetId: string, workspaceId: string) => void
   removeAssetFromWorkspace: (assetId: string, workspaceId: string) => void
+
+  // ── Actions: Selection & preview ─────────────────────────────────
   setSelectedAssets: (assetIds: string[], append?: boolean) => void
-  setPreviewAsset: (asset: Asset | null, fullscreen?: boolean) => void
+  setPreviewAsset: (asset: AssetLite | null, fullscreen?: boolean) => void
   setFullscreenPreview: (fullscreen: boolean) => void
+
+  // ── Actions: Search & filters ────────────────────────────────────
   setSearchQuery: (query: string) => void
   setKeywordFilter: (query: string) => void
   setColorFilter: (filter: ColorFilter | null) => void
@@ -99,21 +190,54 @@ interface AssetStore {
   setRatingFilter: (filter: number[] | null) => void
   setSizeFilter: (filter: string[] | null) => void
   setDurationFilter: (filter: string[] | null) => void
+
+  // ── Actions: View & UI preferences ───────────────────────────────
+  setActiveView: (view: ViewType, workspaceId?: string | null) => void
+  setLeftSidebarVisible: (visible: boolean) => void
+  setRightSidebarVisible: (visible: boolean) => void
+  toggleLeftSidebar: () => void
+  toggleRightSidebar: () => void
   setThumbnailSize: (size: number) => void
   setLayoutMode: (mode: "grid" | "masonry") => void
   setSortConfig: (config: SortConfig) => void
   setSimilarAssetIds: (ids: string[] | null) => void
-  updateAssetProperty: (assetId: string, updates: Partial<Asset>) => void
-  removeAsset: (assetId: string) => void
 }
+
+// ─── Initial pagination ──────────────────────────────────────────────
+const initialPagination: PaginationState = {
+  page: 1,
+  pageSize: 100,
+  totalCount: 0,
+  hasMore: false,
+}
+
+// ─── Store implementation ────────────────────────────────────────────
 
 export const useAssetStore = create<AssetStore>((set) => ({
   assets: [],
+  assetDetail: null,
+
+  // Library state
+  currentLibrary: null,
+  currentLibraryPath: null,
+  recentLibraries: [],
+  isLoadingLibrary: false,
+
+  // Pagination
+  pagination: initialPagination,
+
+  // Workspaces
   workspaces: [
     { id: "1", name: "Project Alpha" },
     { id: "2", name: "需求参考" }
   ],
+
+  // Selection & preview
   selectedAssets: [],
+  previewAsset: null,
+  isFullscreenPreview: false,
+
+  // Search & filters
   searchQuery: "",
   keywordFilter: "",
   colorFilter: null,
@@ -124,6 +248,8 @@ export const useAssetStore = create<AssetStore>((set) => ({
   ratingFilter: null,
   sizeFilter: null,
   durationFilter: null,
+
+  // View & UI preferences
   activeView: "all",
   activeWorkspaceId: null,
   isLeftSidebarVisible: true,
@@ -132,46 +258,80 @@ export const useAssetStore = create<AssetStore>((set) => ({
   layoutMode: "masonry",
   sortConfig: { field: 'created_at', order: 'desc' },
   similarAssetIds: null,
-  previewAsset: null,
-  isFullscreenPreview: false,
+
+  // ── Actions: Assets ──────────────────────────────────────────────
   setAssets: (assets) => set({ assets }),
+  appendAssets: (items) => set((state) => ({
+    assets: [...state.assets, ...items]
+  })),
+  setAssetDetail: (detail) => set({ assetDetail: detail }),
+  updateAssetProperty: (assetId, updates) => set((state) => ({
+    assets: state.assets.map(a =>
+      a.id === assetId ? { ...a, ...updates } as AssetLite : a
+    )
+  })),
+  removeAsset: (assetId) => set((state) => ({
+    assets: state.assets.filter(a => a.id !== assetId),
+    selectedAssets: state.selectedAssets.filter(id => id !== assetId),
+    previewAsset: state.previewAsset?.id === assetId ? null : state.previewAsset,
+    assetDetail: state.assetDetail?.id === assetId ? null : state.assetDetail,
+  })),
+
+  // ── Actions: Library ─────────────────────────────────────────────
+  setCurrentLibrary: (lib, path) => set({
+    currentLibrary: lib,
+    currentLibraryPath: path,
+  }),
+  setRecentLibraries: (libs) => set({ recentLibraries: libs }),
+  setIsLoadingLibrary: (loading) => set({ isLoadingLibrary: loading }),
+  setPagination: (p) => set((state) => ({
+    pagination: { ...state.pagination, ...p }
+  })),
+  resetForNewLibrary: () => set({
+    assets: [],
+    assetDetail: null,
+    selectedAssets: [],
+    previewAsset: null,
+    isFullscreenPreview: false,
+    searchQuery: "",
+    keywordFilter: "",
+    colorFilter: null,
+    typeFilter: null,
+    tagFilter: null,
+    folderFilter: null,
+    shapeFilter: null,
+    ratingFilter: null,
+    sizeFilter: null,
+    durationFilter: null,
+    similarAssetIds: null,
+    activeView: "all",
+    activeWorkspaceId: null,
+    pagination: initialPagination,
+  }),
+
+  // ── Actions: Workspaces ──────────────────────────────────────────
   addWorkspace: (name) => set((state) => ({
     workspaces: [...state.workspaces, { id: Math.random().toString(36).substr(2, 9), name }]
   })),
-  setActiveView: (view, workspaceId = null) => set({ activeView: view, activeWorkspaceId: workspaceId }),
-  setLeftSidebarVisible: (visible) => set({ isLeftSidebarVisible: visible }),
-  setRightSidebarVisible: (visible) => set({ isRightSidebarVisible: visible }),
-  toggleLeftSidebar: () => set((state) => ({ isLeftSidebarVisible: !state.isLeftSidebarVisible })),
-  toggleRightSidebar: () => set((state) => ({ isRightSidebarVisible: !state.isRightSidebarVisible })),
-  assignAssetToWorkspace: (assetId, workspaceId) => set((state) => ({
-    assets: state.assets.map(a => {
-      if (a.id === assetId) {
-        const currentWs = typeof a.workspace_ids === 'string' ? JSON.parse(a.workspace_ids) : []
-        if (Array.isArray(currentWs) && !currentWs.includes(workspaceId)) {
-          return { ...a, workspace_ids: JSON.stringify([...currentWs, workspaceId]) }
-        }
-      }
-      return a
-    })
-  })),
-  removeAssetFromWorkspace: (assetId, workspaceId) => set((state) => ({
-    assets: state.assets.map(a => {
-      if (a.id === assetId && a.workspace_ids) {
-        const currentWs = typeof a.workspace_ids === 'string' ? JSON.parse(a.workspace_ids) : []
-        if (Array.isArray(currentWs)) {
-          return { ...a, workspace_ids: JSON.stringify(currentWs.filter((id: string) => id !== workspaceId)) }
-        }
-      }
-      return a
-    })
-  })),
+  assignAssetToWorkspace: (_assetId, _workspaceId) => {
+    // Workspace assignment now goes through the backend (update_asset).
+    // The lightweight AssetLite items don't carry workspace_ids, so we
+    // no longer update them in-place here. Kept for API compatibility.
+  },
+  removeAssetFromWorkspace: (_assetId, _workspaceId) => {
+    // Same as above — delegated to the backend.
+  },
+
+  // ── Actions: Selection & preview ─────────────────────────────────
   setSelectedAssets: (assetIds, append = false) => set((state) => ({
-    selectedAssets: append 
+    selectedAssets: append
       ? Array.from(new Set([...state.selectedAssets, ...assetIds]))
       : assetIds
   })),
   setPreviewAsset: (asset, fullscreen = false) => set({ previewAsset: asset, isFullscreenPreview: fullscreen }),
   setFullscreenPreview: (fullscreen) => set({ isFullscreenPreview: fullscreen }),
+
+  // ── Actions: Search & filters ────────────────────────────────────
   setSearchQuery: (query) => set({ searchQuery: query }),
   setKeywordFilter: (query) => set({ keywordFilter: query }),
   setColorFilter: (filter) => set({ colorFilter: filter }),
@@ -182,20 +342,15 @@ export const useAssetStore = create<AssetStore>((set) => ({
   setRatingFilter: (filter) => set({ ratingFilter: filter }),
   setSizeFilter: (filter) => set({ sizeFilter: filter }),
   setDurationFilter: (filter) => set({ durationFilter: filter }),
+
+  // ── Actions: View & UI preferences ───────────────────────────────
+  setActiveView: (view, workspaceId = null) => set({ activeView: view, activeWorkspaceId: workspaceId }),
+  setLeftSidebarVisible: (visible) => set({ isLeftSidebarVisible: visible }),
+  setRightSidebarVisible: (visible) => set({ isRightSidebarVisible: visible }),
+  toggleLeftSidebar: () => set((state) => ({ isLeftSidebarVisible: !state.isLeftSidebarVisible })),
+  toggleRightSidebar: () => set((state) => ({ isRightSidebarVisible: !state.isRightSidebarVisible })),
   setThumbnailSize: (size) => set({ thumbnailSize: size }),
   setLayoutMode: (mode) => set({ layoutMode: mode }),
   setSortConfig: (config) => set({ sortConfig: config }),
   setSimilarAssetIds: (ids) => set({ similarAssetIds: ids }),
-  updateAssetProperty: (assetId, updates) => set((state) => {
-    const newAssets = state.assets.map(a => 
-      a.id === assetId ? { ...a, ...updates } : a
-    )
-    
-    return { assets: newAssets }
-  }),
-  removeAsset: (assetId) => set((state) => ({
-    assets: state.assets.filter(a => a.id !== assetId),
-    selectedAssets: state.selectedAssets.filter(id => id !== assetId),
-    previewAsset: state.previewAsset?.id === assetId ? null : state.previewAsset
-  }))
 }))
