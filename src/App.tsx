@@ -55,10 +55,10 @@ function App() {
       }
       if (e.key === 'Delete') {
         // Find if an asset is selected
-        const selectedAsset = useAssetStore.getState().selectedAsset;
-        if (selectedAsset && useAssetStore.getState().activeView !== 'trash') {
+        const selectedAssetId = useAssetStore.getState().selectedAssets[0];
+        if (selectedAssetId && useAssetStore.getState().activeView !== 'trash') {
           // Trigger delete on selected asset
-          document.getElementById(`delete-asset-${selectedAsset.id}`)?.click();
+          document.getElementById(`delete-asset-${selectedAssetId}`)?.click();
         }
       }
     };
@@ -97,7 +97,8 @@ function App() {
           // Debounce this in real life to avoid spamming the backend
           if (payload.event_type === 'create' || payload.event_type === 'modify') {
              // We can trigger a partial scan or just re-fetch
-             const parentDir = payload.path.substring(0, payload.path.lastIndexOf(/[/\\]/));
+             const lastSep = Math.max(payload.path.lastIndexOf('/'), payload.path.lastIndexOf('\\'));
+             const parentDir = payload.path.substring(0, lastSep);
              try {
                await invoke("scan_directory", { dirPath: parentDir });
                const allAssets = await invoke("get_all_assets");
@@ -132,12 +133,12 @@ function App() {
   return (
     <MainLayout>
       <div className="flex flex-1 overflow-hidden">
-        <main className="flex-1 flex flex-col min-w-0 overflow-hidden bg-white dark:bg-[#121212]">
+        <main className="relative flex-1 flex flex-col min-w-0 overflow-hidden bg-white dark:bg-[#121212]">
           <AssetsPage />
+          <Lightbox />
         </main>
         {isRightSidebarVisible && <RightSidebar />}
       </div>
-      <Lightbox />
     </MainLayout>
   )
 }

@@ -24,10 +24,11 @@ tauri-plugin-dialog = "2.0.0-rc"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.0.0-rc.17", features = [] }
+tauri = { version = "2.0.0-rc.17", features = ["protocol-asset"] }
 tauri-plugin-log = "2.0.0-rc"
-image = "0.23.14"
-base64 = "0.22.1"
+image = "0.25"
+rayon = "1.10"
+sha2 = "0.10"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
 img_hash = "3.2.0"

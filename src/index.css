@@ -2,6 +2,15 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Hide scrollbar but keep scroll functionality */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
 :root {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
   line-height: 1.5;
@@ -12,3 +21,29 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+
+/* Highlight.js GitHub Dark Dimmed theme */
+.hljs{color:#adbac7;background:transparent}.hljs-doctag,.hljs-keyword,.hljs-meta .hljs-keyword,.hljs-template-tag,.hljs-template-variable,.hljs-type,.hljs-variable.language_{color:#f47067}.hljs-title,.hljs-title.class_,.hljs-title.class_.inherited__,.hljs-title.function_{color:#dcbdfb}.hljs-attr,.hljs-attribute,.hljs-literal,.hljs-meta,.hljs-number,.hljs-operator,.hljs-selector-attr,.hljs-selector-class,.hljs-selector-id,.hljs-variable{color:#6cb6ff}.hljs-meta .hljs-string,.hljs-regexp,.hljs-string{color:#96d0ff}.hljs-built_in,.hljs-symbol{color:#f69d50}.hljs-code,.hljs-comment,.hljs-formula{color:#768390}.hljs-name,.hljs-quote,.hljs-selector-pseudo,.hljs-selector-tag{color:#8ddb8c}.hljs-subst{color:#adbac7}.hljs-section{color:#316dca;font-weight:700}.hljs-bullet{color:#eac55f}.hljs-emphasis{color:#adbac7;font-style:italic}.hljs-strong{color:#adbac7;font-weight:700}.hljs-addition{color:#b4f1b4;background-color:#1b4721}.hljs-deletion{color:#ffd8d3;background-color:#78191b}
+
+/* Markdown prose styles (dark mode) */
+.markdown-body{color:#c9d1d9;font-size:14px;line-height:1.7;word-wrap:break-word}
+.markdown-body h1{font-size:2em;border-bottom:1px solid #30363d;padding-bottom:.3em;margin:1em 0 .6em}
+.markdown-body h2{font-size:1.5em;border-bottom:1px solid #30363d;padding-bottom:.3em;margin:1em 0 .6em}
+.markdown-body h3{font-size:1.25em;margin:1em 0 .5em}
+.markdown-body h4,.markdown-body h5,.markdown-body h6{font-size:1em;margin:1em 0 .5em}
+.markdown-body p{margin:.5em 0 1em}
+.markdown-body ul,.markdown-body ol{margin:.5em 0 1em;padding-left:2em}
+.markdown-body li{margin:.25em 0}
+.markdown-body blockquote{border-left:4px solid #30363d;padding:.5em 1em;color:#8b949e;margin:.5em 0 1em;background:#161b22}
+.markdown-body code{background:#1b1f24;padding:.2em .4em;border-radius:4px;font-size:85%;font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,monospace}
+.markdown-body pre{background:#0d1117;border-radius:6px;padding:1em;overflow-x:auto;margin:.5em 0 1em}
+.markdown-body pre code{background:none;padding:0;font-size:100%}
+.markdown-body table{border-collapse:collapse;width:100%;margin:.5em 0 1em}
+.markdown-body th,.markdown-body td{border:1px solid #30363d;padding:.5em .75em;text-align:left}
+.markdown-body th{background:#161b22;font-weight:600}
+.markdown-body tr:nth-child(2n){background:#0d1117}
+.markdown-body a{color:#58a6ff;text-decoration:none}
+.markdown-body a:hover{text-decoration:underline}
+.markdown-body hr{border:none;border-top:1px solid #30363d;margin:1.5em 0}
+.markdown-body img{max-width:100%;border-radius:6px}
+.markdown-body input[type="checkbox"]{margin-right:.5em}

@@ -1,11 +1,12 @@
-import { Image as ImageIcon, FileText, Video, Box, ChevronLeft, ChevronRight, Filter, Grid, List, Search, ChevronDown, Columns, FolderOpen, Trash2, Copy, Edit2, MoveRight, PlusCircle, Tag, Image, Link } from "lucide-react"
+import { Image as ImageIcon, FileText, Video, Box, ChevronLeft, ChevronRight, Filter, Grid, List, Search, ChevronDown, Columns, FolderOpen, Trash2, Copy, Edit2, MoveRight, PlusCircle, Tag, Image, Link, Star, HardDrive, Maximize2 } from "lucide-react"
 import { useAssetStore, getSafeArray } from "@/store/useAssetStore"
 import * as ContextMenu from '@radix-ui/react-context-menu'
 import { invoke } from "@tauri-apps/api/core"
 import { TagsView } from "./TagsView"
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useRef, useMemo, useEffect, useState } from 'react'
+import { useRef, useMemo, useEffect, useState, useCallback } from 'react'
 import Selecto from "react-selecto"
+import { ColorWheelPicker } from "@/components/ColorWheelPicker"
 
 const safeInvoke = async (command: string, args?: any) => {
   if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
@@ -34,15 +35,21 @@ function colorDistance(hex1: string, hex2: string) {
   )
 }
 
-const PRESET_COLORS = [
-  { label: "Red", value: "#ff0000" },
-  { label: "Orange", value: "#ffa500" },
-  { label: "Yellow", value: "#ffff00" },
-  { label: "Green", value: "#008000" },
-  { label: "Blue", value: "#0000ff" },
-  { label: "Purple", value: "#800080" },
-  { label: "Black", value: "#000000" },
-  { label: "White", value: "#ffffff" },
+const SIZE_FILTER_OPTIONS = [
+  { label: '< 100 KB', min: 0, max: 100 * 1024 },
+  { label: '100 KB - 1 MB', min: 100 * 1024, max: 1024 * 1024 },
+  { label: '1 MB - 10 MB', min: 1024 * 1024, max: 10 * 1024 * 1024 },
+  { label: '10 MB - 100 MB', min: 10 * 1024 * 1024, max: 100 * 1024 * 1024 },
+  { label: '> 100 MB', min: 100 * 1024 * 1024, max: Infinity },
+]
+
+const RATING_FILTER_OPTIONS = [1, 2, 3, 4, 5]
+
+const SHAPE_FILTER_OPTIONS = [
+  { label: '方图', shape: 'square' },
+  { label: '宽图', shape: 'wide' },
+  { label: '竖图', shape: 'tall' },
+  { label: '长图', shape: 'panoramic' },
 ]
 
 function getAssetColor(type: string) {
@@ -105,8 +112,8 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
           className={`selectable-asset group flex flex-col items-center cursor-pointer break-inside-avoid ${layoutMode === 'masonry' ? 'mb-8' : ''}`}
         >
           <div className={`relative w-full rounded-xl overflow-hidden transition-all duration-200 ${
-            isSelected 
-              ? "ring-2 ring-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.4)]" 
+            isSelected
+              ? "ring-2 ring-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.4)]"
               : "ring-1 ring-zinc-200 dark:ring-zinc-800 hover:ring-zinc-300 dark:hover:ring-zinc-700"
           }`}>
             {asset.is_missing && (
@@ -299,22 +306,38 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
 }
 
 export function AssetsPage() {
-  const { 
-    assets, setSelectedAssets, selectedAssets, searchQuery, setSearchQuery, 
-    keywordFilter, setKeywordFilter,
+  const {
+    assets, setSelectedAssets, selectedAssets, searchQuery, setSearchQuery,
     colorFilter, setColorFilter, typeFilter, setTypeFilter, tagFilter, setTagFilter,
-    folderFilter, setFolderFilter, shapeFilter, setShapeFilter,
+    folderFilter,
+    sizeFilter, setSizeFilter, ratingFilter, setRatingFilter,
+    shapeFilter, setShapeFilter,
     activeView, activeWorkspaceId, workspaces, thumbnailSize, setThumbnailSize, layoutMode, setLayoutMode,
     sortConfig, setSortConfig, similarAssetIds, setSimilarAssetIds, setPreviewAsset,
     removeAsset, updateAssetProperty, assignAssetToWorkspace
   } = useAssetStore()
 
   const [isColorPickerOpen, setIsColorPickerOpen] = useState(false)
-  const [exactColorMatch, setExactColorMatch] = useState(false)
+  const [isSizeFilterOpen, setIsSizeFilterOpen] = useState(false)
+  const [isRatingFilterOpen, setIsRatingFilterOpen] = useState(false)
+  const [isShapeFilterOpen, setIsShapeFilterOpen] = useState(false)
 
   // Virtualization Logic for Grid Mode
   const parentRef = useRef<HTMLDivElement>(null)
-  const containerWidth = parentRef.current?.clientWidth || 1000 // Fallback width
+  const [containerWidth, setContainerWidth] = useState(1000)
+
+  // Track container width reactively with ResizeObserver
+  useEffect(() => {
+    const el = parentRef.current
+    if (!el) return
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setContainerWidth(entry.contentRect.width)
+      }
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
 
   const handleAssetSelect = (assetId: string, e: React.MouseEvent) => {
     if (e.ctrlKey || e.metaKey) {
@@ -330,8 +353,17 @@ export function AssetsPage() {
       
       if (layoutMode === 'masonry') {
         // Spatial selection for Masonry
-        const lastEl = document.querySelector(`[data-id="${lastSelectedId}"]`);
-        const currEl = document.querySelector(`[data-id="${assetId}"]`);
+        // Iterate all .selectable-asset elements and compare data-id directly
+        // (avoiding querySelector which breaks on file paths with backslashes on Windows)
+        const allElements = document.querySelectorAll('.selectable-asset');
+        let lastEl: Element | null = null;
+        let currEl: Element | null = null;
+
+        allElements.forEach(el => {
+          const id = el.getAttribute('data-id');
+          if (id === lastSelectedId) lastEl = el;
+          if (id === assetId) currEl = el;
+        });
 
         if (lastEl && currEl) {
           const r1 = lastEl.getBoundingClientRect();
@@ -343,11 +375,11 @@ export function AssetsPage() {
           const maxY = Math.max(r1.bottom, r2.bottom);
 
           const rangeIds: string[] = [];
-          document.querySelectorAll('.selectable-asset').forEach(el => {
+          allElements.forEach(el => {
             const r = el.getBoundingClientRect();
             const centerX = r.left + r.width / 2;
             const centerY = r.top + r.height / 2;
-            
+
             if (centerX >= minX && centerX <= maxX && centerY >= minY && centerY <= maxY) {
               const id = el.getAttribute('data-id');
               if (id) rangeIds.push(id);
@@ -541,8 +573,40 @@ export function AssetsPage() {
         }
       }
     }
-    
-    return matchesWorkspace && matchesSearch && matchesType && matchesTag && matchesColor && matchesFolder
+
+    // Size filter
+    let matchesSize = true
+    if (sizeFilter && sizeFilter.length > 0) {
+      matchesSize = sizeFilter.some(key => {
+        const opt = SIZE_FILTER_OPTIONS.find(o => o.label === key)
+        if (!opt) return false
+        return asset.size >= opt.min && asset.size < opt.max
+      })
+    }
+
+    // Rating filter
+    let matchesRating = true
+    if (ratingFilter && ratingFilter.length > 0) {
+      matchesRating = ratingFilter.includes(asset.rating || 0)
+    }
+
+    // Shape filter
+    let matchesShape = true
+    if (shapeFilter && shapeFilter.length > 0) {
+      if (!asset.width || !asset.height) {
+        matchesShape = false
+      } else {
+        const ratio = asset.width / asset.height
+        const shapes: string[] = []
+        if (ratio >= 0.8 && ratio <= 1.25) shapes.push('square')
+        if (ratio > 1.25) shapes.push('wide')
+        if (ratio < 0.8) shapes.push('tall')
+        if (ratio > 2.5) shapes.push('panoramic')
+        matchesShape = shapeFilter.some(s => shapes.includes(s))
+      }
+    }
+
+    return matchesWorkspace && matchesSearch && matchesType && matchesTag && matchesColor && matchesFolder && matchesSize && matchesRating && matchesShape
   }).sort((a, b) => {
     const { field, order } = sortConfig
     let comparison = 0
@@ -568,7 +632,7 @@ export function AssetsPage() {
     return order === 'asc' ? comparison : -comparison
   })
 
-  // Determine number of columns based on container width and thumbnail size
+  // Grid: use CSS flexbox wrap with fixed item width for stable layout
   const gap = 24
   const columnCount = useMemo(() => {
     return Math.max(1, Math.floor((containerWidth + gap) / (thumbnailSize + gap)))
@@ -578,13 +642,23 @@ export function AssetsPage() {
     return Math.ceil(filteredAssets.length / columnCount)
   }, [filteredAssets.length, columnCount])
 
-  // Virtualizer for the grid rows
+  // Measure actual row height for accurate virtualization
+  const measureRowHeight = useCallback((index: number) => {
+    const cardHeight = thumbnailSize + 72 // image + label area (name + meta + margins)
+    return cardHeight + gap // gap between rows
+  }, [thumbnailSize, gap])
+
   const rowVirtualizer = useVirtualizer({
     count: rowCount,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => thumbnailSize + 90, // image height + label area (name ~26px + size ~20px + margins ~16px + row gap ~12px + safety)
+    estimateSize: measureRowHeight,
     overscan: 5,
   })
+
+  // Force virtualizer to recalculate when thumbnail size or column count changes
+  useEffect(() => {
+    rowVirtualizer.measure()
+  }, [thumbnailSize, columnCount, rowVirtualizer])
 
   // Prevent "Rendered fewer hooks than expected" by ensuring early returns happen AFTER all hooks.
   if (activeView === 'tags') {
@@ -594,41 +668,41 @@ export function AssetsPage() {
   return (
     <div className="flex flex-col h-full bg-white dark:bg-zinc-950">
       {/* Top Breadcrumb & Controls */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-200 dark:border-zinc-800 shrink-0">
-        <div className="flex items-center gap-2">
-          <button className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition-colors text-zinc-500">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-200 dark:border-zinc-800 shrink-0 gap-2">
+        <div className="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
+          <button className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition-colors text-zinc-500 shrink-0">
             <ChevronLeft className="w-5 h-5" />
           </button>
-          <button className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition-colors text-zinc-300 dark:text-zinc-700">
+          <button className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition-colors text-zinc-300 dark:text-zinc-700 shrink-0">
             <ChevronRight className="w-5 h-5" />
           </button>
-          <span className="ml-2 font-bold text-zinc-900 dark:text-zinc-100">
+          <span className="ml-2 font-bold text-zinc-900 dark:text-zinc-100 truncate">
             {similarAssetIds ? "相似图检索结果" : activeWorkspaceName}
           </span>
           {similarAssetIds && (
-            <button 
+            <button
               onClick={() => setSimilarAssetIds(null)}
-              className="ml-3 text-xs px-2 py-1 bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 rounded-md hover:bg-indigo-100 transition-colors"
+              className="ml-3 text-xs px-2 py-1 bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 rounded-md hover:bg-indigo-100 transition-colors shrink-0"
             >
               退出检索
             </button>
           )}
         </div>
-        <div className="flex items-center gap-1 text-zinc-500">
-          <div className="flex items-center mr-4">
-            <input 
-              type="range" 
-              min="100" 
-              max="400" 
-              value={thumbnailSize} 
+        <div className="flex items-center gap-1 text-zinc-500 min-w-0">
+          <div className="flex items-center mr-4 shrink">
+            <input
+              type="range"
+              min="100"
+              max="400"
+              value={thumbnailSize}
               onChange={(e) => setThumbnailSize(Number(e.target.value))}
               className="w-24 h-1 bg-zinc-200 dark:bg-zinc-800 rounded-lg appearance-none cursor-pointer"
             />
           </div>
-          
+
           {/* Sort Dropdown */}
-          <div className="relative group mr-2">
-            <button className="flex items-center gap-1 px-2 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition-colors text-sm">
+          <div className="relative group mr-2 shrink-0">
+            <button className="flex items-center gap-1 px-2 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition-colors text-sm whitespace-nowrap">
               排序 <ChevronDown className="w-3 h-3" />
             </button>
             <div className="absolute top-full right-0 mt-1 hidden group-hover:flex flex-col bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg z-20 py-1 min-w-[120px]">
@@ -640,18 +714,18 @@ export function AssetsPage() {
               <button onClick={() => setSortConfig({ field: 'rating', order: 'desc' })} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'rating' && sortConfig.order === 'desc' ? 'text-indigo-500' : ''}`}>评分最高</button>
             </div>
           </div>
-          <button className="p-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition-colors">
+          <button className="p-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition-colors shrink-0">
             <Filter className="w-4 h-4" />
           </button>
-          <div className="flex items-center bg-zinc-100 dark:bg-zinc-800 rounded p-0.5 mx-1">
-            <button 
+          <div className="flex items-center bg-zinc-100 dark:bg-zinc-800 rounded p-0.5 mx-1 shrink-0">
+            <button
               onClick={() => setLayoutMode('grid')}
               className={`p-1 rounded transition-colors ${layoutMode === 'grid' ? 'bg-white dark:bg-zinc-700 shadow-sm text-zinc-900 dark:text-zinc-100' : 'hover:text-zinc-900 dark:hover:text-zinc-100'}`}
               title="网格视图"
             >
               <Grid className="w-4 h-4" />
             </button>
-            <button 
+            <button
               onClick={() => setLayoutMode('masonry')}
               className={`p-1 rounded transition-colors ${layoutMode === 'masonry' ? 'bg-white dark:bg-zinc-700 shadow-sm text-zinc-900 dark:text-zinc-100' : 'hover:text-zinc-900 dark:hover:text-zinc-100'}`}
               title="瀑布流视图"
@@ -659,14 +733,14 @@ export function AssetsPage() {
               <Columns className="w-4 h-4" />
             </button>
           </div>
-          <div className="relative flex items-center ml-2">
-            <Search className="w-4 h-4 absolute left-2 text-zinc-400" />
-            <input 
-              type="text" 
-              placeholder="搜索资产..." 
+          <div className="relative flex items-center ml-2 min-w-0 flex-1 max-w-[12rem]">
+            <Search className="w-4 h-4 absolute left-2 text-zinc-400 shrink-0" />
+            <input
+              type="text"
+              placeholder="搜索资产..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-8 pr-3 py-1.5 bg-zinc-100 dark:bg-zinc-800 border-none rounded-md text-sm w-48 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400"
+              className="pl-8 pr-3 py-1.5 bg-zinc-100 dark:bg-zinc-800 border-none rounded-md text-sm w-full focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400"
             />
           </div>
         </div>
@@ -675,83 +749,38 @@ export function AssetsPage() {
       {/* Filter Bar */}
       <div className="flex items-center gap-4 px-6 py-2 border-b border-zinc-100 dark:border-zinc-800 shrink-0 overflow-visible relative z-30">
         {/* Color Filter */}
-        <div className="relative group">
-          <button 
+        <div className="relative shrink-0 flex items-center gap-1">
+          <button
             onClick={() => setIsColorPickerOpen(!isColorPickerOpen)}
-            className="w-5 h-5 rounded-full bg-gradient-to-br from-red-500 via-green-500 to-blue-500 flex-shrink-0 ring-1 ring-zinc-200 dark:ring-zinc-700" 
+            className="w-5 h-5 rounded-full bg-gradient-to-br from-red-500 via-green-500 to-blue-500 flex-shrink-0 ring-1 ring-zinc-200 dark:ring-zinc-700"
           />
+          {colorFilter && (
+            <button
+              onClick={() => setColorFilter(null)}
+              className="w-3.5 h-3.5 rounded-full flex items-center justify-center text-[10px] text-zinc-400 hover:text-red-500 transition-colors"
+              title="清除颜色筛选"
+            >
+              ✕
+            </button>
+          )}
           {isColorPickerOpen && (
-            <div className="absolute top-full left-0 mt-2 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 p-3 rounded-xl shadow-xl z-[100] w-64">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-medium text-zinc-500">颜色筛选</span>
-                <div className="flex items-center gap-1.5 text-xs text-zinc-500">
-                  <input 
-                    type="checkbox" 
-                    id="exactMatch" 
-                    checked={exactColorMatch} 
-                    onChange={(e) => setExactColorMatch(e.target.checked)} 
-                    className="rounded border-zinc-300 text-indigo-500 focus:ring-indigo-500"
-                  />
-                  <label htmlFor="exactMatch">精确匹配</label>
-                </div>
-              </div>
-              <div className="grid grid-cols-4 gap-2 mb-3">
-                {PRESET_COLORS.map(color => (
-                  <button
-                    key={color.label}
-                    title={color.label}
-                    onClick={() => {
-                      if (colorFilter?.hex === color.value) {
-                        setColorFilter(null)
-                      } else {
-                        setColorFilter({ hex: color.value, exact: exactColorMatch })
-                      }
-                      setIsColorPickerOpen(false)
-                    }}
-                    className={`w-full aspect-square rounded-md border shadow-sm transition-transform hover:scale-105 ${
-                      colorFilter?.hex === color.value 
-                        ? "border-blue-500 ring-2 ring-blue-500 ring-offset-1 dark:ring-offset-zinc-900" 
-                        : "border-zinc-200 dark:border-zinc-700"
-                    }`}
-                    style={{ backgroundColor: color.value }}
-                  />
-                ))}
-              </div>
-              <div className="flex items-center gap-2">
-                <input 
-                  type="color" 
-                  value={colorFilter?.hex || "#000000"} 
-                  onChange={(e) => setColorFilter({ hex: e.target.value, exact: exactColorMatch })}
-                  className="w-8 h-8 rounded cursor-pointer border-0 p-0 bg-transparent"
+            <>
+              <div className="fixed inset-0 z-[99]" onClick={() => setIsColorPickerOpen(false)} />
+              <div className="absolute top-full left-0 mt-2 z-[100]">
+                <ColorWheelPicker
+                  color={colorFilter?.hex || '#000000'}
+                  onChange={(hex) => setColorFilter({ hex, exact: false })}
                 />
-                <span className="text-xs text-zinc-500 uppercase">{colorFilter?.hex || "自定义"}</span>
-                {colorFilter && (
-                  <button 
-                    onClick={() => setColorFilter(null)}
-                    className="ml-auto text-xs text-zinc-400 hover:text-red-500"
-                  >
-                    清除
-                  </button>
-                )}
               </div>
-            </div>
+            </>
           )}
         </div>
 
-        <div className="h-4 w-px bg-zinc-200 dark:bg-zinc-800" />
+        <div className="h-4 w-px bg-zinc-200 dark:bg-zinc-800 shrink-0" />
 
         {/* Filter Chips */}
         <div className="flex items-center gap-3 text-sm text-zinc-600 dark:text-zinc-400 whitespace-nowrap">
-          <button 
-            className="flex items-center gap-1 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
-            onClick={() => document.querySelector<HTMLInputElement>('input[placeholder="搜索资产..."]')?.focus()}
-          >
-            关键字
-          </button>
-          <button className="hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">文件名</button>
-          <button className="flex items-center gap-1 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">
-            文件夹 <ChevronDown className="w-3 h-3" />
-          </button>
+          {/* Tags */}
           <div className="relative group">
             <button className={`flex items-center gap-1 transition-colors ${tagFilter && tagFilter.length > 0 ? 'text-indigo-500 font-medium' : 'hover:text-zinc-900 dark:hover:text-zinc-100'}`}>
               {tagFilter && tagFilter.length > 0 ? `标签: ${tagFilter.length}项` : '标签'} <ChevronDown className="w-3 h-3" />
@@ -761,8 +790,8 @@ export function AssetsPage() {
               {allTags.length > 0 ? allTags.map((tag: any) => {
                 const isSelected = tagFilter?.includes(tag)
                 return (
-                  <button 
-                    key={tag} 
+                  <button
+                    key={tag}
                     onClick={() => {
                       const current = tagFilter || []
                       if (isSelected) {
@@ -770,7 +799,7 @@ export function AssetsPage() {
                       } else {
                         setTagFilter([...current, tag])
                       }
-                    }} 
+                    }}
                     className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-between"
                   >
                     <span>{tag}</span>
@@ -782,6 +811,8 @@ export function AssetsPage() {
               )}
             </div>
           </div>
+
+          {/* Type */}
           <div className="relative group">
             <button className={`flex items-center gap-1 transition-colors ${typeFilter && typeFilter.length > 0 ? 'text-indigo-500 font-medium' : 'hover:text-zinc-900 dark:hover:text-zinc-100'}`}>
               {typeFilter && typeFilter.length > 0 ? `类型: ${typeFilter.length}项` : '类型'} <ChevronDown className="w-3 h-3" />
@@ -791,7 +822,7 @@ export function AssetsPage() {
               {['image', 'video', 'document'].map(t => {
                 const isSelected = typeFilter?.includes(t)
                 return (
-                  <button 
+                  <button
                     key={t}
                     onClick={() => {
                       const current = typeFilter || []
@@ -800,7 +831,7 @@ export function AssetsPage() {
                       } else {
                         setTypeFilter([...current, t])
                       }
-                    }} 
+                    }}
                     className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-between"
                   >
                     <span>{t === 'image' ? '图片' : t === 'video' ? '视频' : '文档'}</span>
@@ -810,9 +841,127 @@ export function AssetsPage() {
               })}
             </div>
           </div>
-          <button className="flex items-center gap-1 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors">
-            形状 <ChevronDown className="w-3 h-3" />
-          </button>
+
+          {/* Size Filter */}
+          <div className="relative">
+            <button
+              onClick={() => setIsSizeFilterOpen(!isSizeFilterOpen)}
+              className={`flex items-center gap-1 transition-colors ${sizeFilter && sizeFilter.length > 0 ? 'text-indigo-500 font-medium' : 'hover:text-zinc-900 dark:hover:text-zinc-100'}`}
+            >
+              <HardDrive className="w-3 h-3" />
+              {sizeFilter && sizeFilter.length > 0 ? `大小: ${sizeFilter.length}项` : '大小'} <ChevronDown className="w-3 h-3" />
+            </button>
+            {isSizeFilterOpen && (
+              <>
+                <div className="fixed inset-0 z-[9]" onClick={() => setIsSizeFilterOpen(false)} />
+                <div className="absolute top-full left-0 mt-1 flex flex-col bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg z-10 py-1 min-w-[140px]">
+                  <button onClick={() => { setSizeFilter(null); setIsSizeFilterOpen(false) }} className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800">清除筛选</button>
+                  {SIZE_FILTER_OPTIONS.map(opt => {
+                    const isSelected = sizeFilter?.includes(opt.label)
+                    return (
+                      <button
+                        key={opt.label}
+                        onClick={() => {
+                          const current = sizeFilter || []
+                          if (isSelected) {
+                            setSizeFilter(current.filter(s => s !== opt.label))
+                          } else {
+                            setSizeFilter([...current, opt.label])
+                          }
+                        }}
+                        className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-between"
+                      >
+                        <span>{opt.label}</span>
+                        {isSelected && <span className="w-2 h-2 rounded-full bg-indigo-500" />}
+                      </button>
+                    )
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Shape Filter */}
+          <div className="relative">
+            <button
+              onClick={() => setIsShapeFilterOpen(!isShapeFilterOpen)}
+              className={`flex items-center gap-1 transition-colors ${shapeFilter && shapeFilter.length > 0 ? 'text-indigo-500 font-medium' : 'hover:text-zinc-900 dark:hover:text-zinc-100'}`}
+            >
+              <Maximize2 className="w-3 h-3" />
+              {shapeFilter && shapeFilter.length > 0 ? `形状: ${shapeFilter.length}项` : '形状'} <ChevronDown className="w-3 h-3" />
+            </button>
+            {isShapeFilterOpen && (
+              <>
+                <div className="fixed inset-0 z-[9]" onClick={() => setIsShapeFilterOpen(false)} />
+                <div className="absolute top-full left-0 mt-1 flex flex-col bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg z-10 py-1 min-w-[100px]">
+                  <button onClick={() => { setShapeFilter(null); setIsShapeFilterOpen(false) }} className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800">清除筛选</button>
+                  {SHAPE_FILTER_OPTIONS.map(opt => {
+                    const isSelected = shapeFilter?.includes(opt.shape)
+                    return (
+                      <button
+                        key={opt.shape}
+                        onClick={() => {
+                          const current = shapeFilter || []
+                          if (isSelected) {
+                            setShapeFilter(current.filter(s => s !== opt.shape))
+                          } else {
+                            setShapeFilter([...current, opt.shape])
+                          }
+                        }}
+                        className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-between"
+                      >
+                        <span>{opt.label}</span>
+                        {isSelected && <span className="w-2 h-2 rounded-full bg-indigo-500" />}
+                      </button>
+                    )
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Rating Filter */}
+          <div className="relative">
+            <button
+              onClick={() => setIsRatingFilterOpen(!isRatingFilterOpen)}
+              className={`flex items-center gap-1 transition-colors ${ratingFilter && ratingFilter.length > 0 ? 'text-indigo-500 font-medium' : 'hover:text-zinc-900 dark:hover:text-zinc-100'}`}
+            >
+              <Star className="w-3 h-3" />
+              {ratingFilter && ratingFilter.length > 0 ? `评分: ${ratingFilter.join(', ')}` : '评分'} <ChevronDown className="w-3 h-3" />
+            </button>
+            {isRatingFilterOpen && (
+              <>
+                <div className="fixed inset-0 z-[9]" onClick={() => setIsRatingFilterOpen(false)} />
+                <div className="absolute top-full left-0 mt-1 flex flex-col bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg z-10 py-1 min-w-[120px]">
+                  <button onClick={() => { setRatingFilter(null); setIsRatingFilterOpen(false) }} className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800">清除筛选</button>
+                  {RATING_FILTER_OPTIONS.map(r => {
+                    const isSelected = ratingFilter?.includes(r)
+                    return (
+                      <button
+                        key={r}
+                        onClick={() => {
+                          const current = ratingFilter || []
+                          if (isSelected) {
+                            setRatingFilter(current.filter(x => x !== r))
+                          } else {
+                            setRatingFilter([...current, r])
+                          }
+                        }}
+                        className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-between"
+                      >
+                        <span className="flex items-center gap-0.5">
+                          {Array.from({ length: r }).map((_, i) => (
+                            <Star key={i} className="w-3 h-3 fill-yellow-400 text-yellow-400" />
+                          ))}
+                        </span>
+                        {isSelected && <span className="w-2 h-2 rounded-full bg-indigo-500" />}
+                      </button>
+                    )
+                  })}
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -824,12 +973,11 @@ export function AssetsPage() {
             selectableTargets={[".selectable-asset"]}
             selectByClick={false}
             selectFromInside={false}
-            toggleContinueSelect={["shift"]}
             hitRate={10}
             onSelectEnd={e => {
               if (e.isDragStart) return;
               const ids = e.selected.map(el => el.getAttribute("data-id")).filter(Boolean) as string[];
-              if (e.inputEvent.ctrlKey || e.inputEvent.metaKey) {
+              if (e.inputEvent.ctrlKey || e.inputEvent.metaKey || e.inputEvent.shiftKey) {
                 setSelectedAssets(Array.from(new Set([...selectedAssets, ...ids])));
               } else {
                 setSelectedAssets(ids);
@@ -865,14 +1013,14 @@ export function AssetsPage() {
                       workspaces={workspaces}
                       onSelect={(e: React.MouseEvent) => handleAssetSelect(asset.id, e)}
                       onContextMenu={() => handleAssetContextMenu(asset.id)}
-                      onPreview={() => setPreviewAsset(asset)}
+                      onPreview={() => setPreviewAsset(asset, true)}
                       onShowInFolder={() => handleShowInFolder(asset.path)}
                       onSearchSimilar={() => handleSearchSimilar(asset.id)}
                       onDelete={(hard: boolean) => handleDeleteAsset(asset.id, hard)}
                       onAssignWorkspace={(wsId: string) => {
                         assignAssetToWorkspace(asset.id, wsId);
-                        safeInvoke("update_asset", { 
-                          id: asset.id, 
+                        safeInvoke("update_asset", {
+                          id: asset.id,
                           workspace_ids: JSON.stringify([...getSafeArray(asset.workspace_ids), wsId])
                         });
                       }}
@@ -896,12 +1044,11 @@ export function AssetsPage() {
                     style={{
                       position: 'absolute',
                       top: 0,
-                      left: 0,
-                      width: '100%',
+                      left: '50%',
                       minHeight: `${virtualRow.size}px`,
-                      transform: `translateY(${virtualRow.start}px)`,
+                      transform: `translate(-50%, ${virtualRow.start}px)`,
                       display: 'grid',
-                      gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))`,
+                      gridTemplateColumns: `repeat(${columnCount}, ${thumbnailSize}px)`,
                       gap: `${gap}px`,
                       paddingBottom: `${gap / 2}px`,
                       overflow: 'visible',
@@ -924,14 +1071,14 @@ export function AssetsPage() {
                           workspaces={workspaces}
                           onSelect={(e: React.MouseEvent) => handleAssetSelect(asset.id, e)}
                           onContextMenu={() => handleAssetContextMenu(asset.id)}
-                          onPreview={() => setPreviewAsset(asset)}
+                          onPreview={() => setPreviewAsset(asset, true)}
                           onShowInFolder={() => handleShowInFolder(asset.path)}
                           onSearchSimilar={() => handleSearchSimilar(asset.id)}
                           onDelete={(hard: boolean) => handleDeleteAsset(asset.id, hard)}
                           onAssignWorkspace={(wsId: string) => {
                             assignAssetToWorkspace(asset.id, wsId);
-                            safeInvoke("update_asset", { 
-                              id: asset.id, 
+                            safeInvoke("update_asset", {
+                              id: asset.id,
                               workspace_ids: JSON.stringify([...getSafeArray(asset.workspace_ids), wsId])
                             });
                           }}

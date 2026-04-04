@@ -14,7 +14,20 @@
       "Bash(npm run tauri dev:*)",
       "Bash(npx tauri dev:*)",
       "Bash(git checkout:*)",
-      "Bash(powershell:*)"
+      "Bash(powershell:*)",
+      "Bash(npm run build:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Skill(superpowers:systematic-debugging)",
+      "Skill(superpowers:writing-plans)",
+      "Skill(superpowers:subagent-driven-development)",
+      "Bash(npm install:*)",
+      "Bash(npm ls:*)",
+      "Bash(ls:*)",
+      "Bash(npm run:*)",
+      "Bash(node:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(dir:*)"
     ]
   }
 }
