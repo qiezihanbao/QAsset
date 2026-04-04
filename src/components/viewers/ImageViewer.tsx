@@ -15,6 +15,7 @@ interface ImageViewerProps {
   preferThumbnail?: boolean
   zoom: number
   onZoomChange: (zoom: number) => void
+  onDisplayScaleChange?: (scale: number) => void
 }
 
 const THUMBNAIL_FIRST_EXTENSIONS = new Set(['psd', 'psb', 'clip'])
@@ -24,12 +25,15 @@ function getFileExt(fileNameOrPath: string): string {
   return fileNameOrPath.split('.').pop()!.toLowerCase()
 }
 
-export function ImageViewer({ filePath, fileName, thumbnailPath, thumbnailBase64, preferThumbnail, zoom, onZoomChange }: ImageViewerProps) {
+export function ImageViewer({ filePath, fileName, thumbnailPath, thumbnailBase64, preferThumbnail, zoom, onZoomChange, onDisplayScaleChange }: ImageViewerProps) {
+  void onZoomChange
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [isDragging, setIsDragging] = useState(false)
   const [imgError, setImgError] = useState(false)
   const dragStart = useRef({ x: 0, y: 0 })
   const panStart = useRef({ x: 0, y: 0 })
+  const containerRef = useRef<HTMLDivElement>(null)
+  const imgRef = useRef<HTMLImageElement>(null)
 
   const isTauri = !!(window.__TAURI_INTERNALS__ || window.__TAURI__)
   const ext = getFileExt(fileName || filePath)
@@ -81,6 +85,41 @@ export function ImageViewer({ filePath, fileName, thumbnailPath, thumbnailBase64
     setIsDragging(false)
   }, [])
 
+  const reportDisplayScale = useCallback(() => {
+    if (!onDisplayScaleChange) return
+    const container = containerRef.current
+    const img = imgRef.current
+    if (!container || !img || img.naturalWidth <= 0 || img.naturalHeight <= 0) return
+
+    const fitScale = Math.min(
+      1,
+      container.clientWidth / img.naturalWidth,
+      container.clientHeight / img.naturalHeight
+    )
+    onDisplayScaleChange(fitScale * zoom)
+  }, [onDisplayScaleChange, zoom])
+
+  useEffect(() => {
+    reportDisplayScale()
+  }, [reportDisplayScale, imageSrc])
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+
+    if (typeof ResizeObserver === 'undefined') {
+      const handleResize = () => reportDisplayScale()
+      window.addEventListener('resize', handleResize)
+      return () => window.removeEventListener('resize', handleResize)
+    }
+
+    const observer = new ResizeObserver(() => {
+      reportDisplayScale()
+    })
+    observer.observe(container)
+    return () => observer.disconnect()
+  }, [reportDisplayScale])
+
   if (!imageSrc) {
     return (
       <div className="text-white/50 flex flex-col items-center justify-center h-full">
@@ -92,6 +131,7 @@ export function ImageViewer({ filePath, fileName, thumbnailPath, thumbnailBase64
 
   return (
     <div
+      ref={containerRef}
       className="w-full h-full flex items-center justify-center overflow-hidden"
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
@@ -100,10 +140,12 @@ export function ImageViewer({ filePath, fileName, thumbnailPath, thumbnailBase64
       style={{ cursor: zoom > 1 ? (isDragging ? 'grabbing' : 'grab') : 'default' }}
     >
       <img
+        ref={imgRef}
         src={imageSrc}
         alt=""
         className="max-w-full max-h-full object-contain drop-shadow-2xl rounded-sm pointer-events-none"
         draggable={false}
+        onLoad={reportDisplayScale}
         onError={() => setImgError(true)}
         style={{
           transform: `scale(${zoom}) translate(${pan.x / zoom}px, ${pan.y / zoom}px)`,

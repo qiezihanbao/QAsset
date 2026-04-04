@@ -1,17 +1,25 @@
 import React, { useEffect } from "react"
 import { useAssetStore } from "@/store/useAssetStore"
+import { useShallow } from "zustand/react/shallow"
 import { LeftSidebar } from "./LeftSidebar"
 import { isMobile } from "@/lib/utils"
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
-  const {
+  const [
     isLeftSidebarVisible,
     isRightSidebarVisible,
     setLeftSidebarVisible,
     setRightSidebarVisible,
     toggleLeftSidebar,
-    toggleRightSidebar
-  } = useAssetStore()
+    toggleRightSidebar,
+  ] = useAssetStore(useShallow((s) => ([
+    s.isLeftSidebarVisible,
+    s.isRightSidebarVisible,
+    s.setLeftSidebarVisible,
+    s.setRightSidebarVisible,
+    s.toggleLeftSidebar,
+    s.toggleRightSidebar,
+  ])))
 
   // Only auto-hide sidebars on mobile at initial load
   useEffect(() => {

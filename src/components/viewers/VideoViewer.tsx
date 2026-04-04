@@ -9,13 +9,19 @@ interface VideoViewerProps {
 
 const PLAYBACK_RATES = [0.5, 1, 1.5, 2]
 
+type TauriWindow = Window & {
+  __TAURI_INTERNALS__?: unknown
+  __TAURI__?: unknown
+}
+
 export function VideoViewer({ filePath, fileName }: VideoViewerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [hasError, setHasError] = useState(false)
   const [playbackRate, setPlaybackRate] = useState(1)
   const [isLooping, setIsLooping] = useState(false)
 
-  const isTauri = !!(window as any).__TAURI_INTERNALS__ || !!(window as any).__TAURI__
+  const runtimeWindow = window as TauriWindow
+  const isTauri = Boolean(runtimeWindow.__TAURI_INTERNALS__ || runtimeWindow.__TAURI__)
   const src = isTauri ? convertFileSrc(filePath) : filePath
 
   const handleError = () => {

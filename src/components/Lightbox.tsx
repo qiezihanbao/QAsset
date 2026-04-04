@@ -1,17 +1,35 @@
-import { useEffect, useCallback, useState, useRef } from "react"
+import { useEffect, useCallback, useState, useRef, lazy, Suspense } from "react"
 import { motion } from "framer-motion"
 import { X, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, RotateCcw } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import { useAssetStore } from "@/store/useAssetStore"
+import { useShallow } from "zustand/react/shallow"
 import { getViewerType } from "@/components/viewers/getViewerType"
-import { ImageViewer, MIN_ZOOM, MAX_ZOOM, ZOOM_STEP, WHEEL_ZOOM_FACTOR } from "@/components/viewers/ImageViewer"
-import { PdfViewer } from "@/components/viewers/PdfViewer"
-import { TextViewer } from "@/components/viewers/TextViewer"
-import { MarkdownViewer } from "@/components/viewers/MarkdownViewer"
-import { VideoViewer } from "@/components/viewers/VideoViewer"
-import { UnsupportedViewer } from "@/components/viewers/UnsupportedViewer"
+
+const ImageViewer = lazy(() =>
+  import("@/components/viewers/ImageViewer").then((m) => ({ default: m.ImageViewer }))
+)
+const PdfViewer = lazy(() =>
+  import("@/components/viewers/PdfViewer").then((m) => ({ default: m.PdfViewer }))
+)
+const TextViewer = lazy(() =>
+  import("@/components/viewers/TextViewer").then((m) => ({ default: m.TextViewer }))
+)
+const MarkdownViewer = lazy(() =>
+  import("@/components/viewers/MarkdownViewer").then((m) => ({ default: m.MarkdownViewer }))
+)
+const VideoViewer = lazy(() =>
+  import("@/components/viewers/VideoViewer").then((m) => ({ default: m.VideoViewer }))
+)
+const UnsupportedViewer = lazy(() =>
+  import("@/components/viewers/UnsupportedViewer").then((m) => ({ default: m.UnsupportedViewer }))
+)
 
 const THUMBNAIL_FIRST_EXTENSIONS = new Set(['psd', 'psb', 'clip'])
+const MIN_ZOOM = 0.5
+const MAX_ZOOM = 10
+const ZOOM_STEP = 0.25
+const WHEEL_ZOOM_FACTOR = 0.001
 
 function getFileExt(fileName: string): string {
   if (!fileName.includes('.')) return ''
@@ -19,7 +37,7 @@ function getFileExt(fileName: string): string {
 }
 
 export function Lightbox() {
-  const {
+  const [
     previewAsset,
     setPreviewAsset,
     isFullscreenPreview,
@@ -28,9 +46,19 @@ export function Lightbox() {
     updateAssetProperty,
     assetDetail,
     setAssetDetail,
-  } = useAssetStore()
+  ] = useAssetStore(useShallow((s) => ([
+    s.previewAsset,
+    s.setPreviewAsset,
+    s.isFullscreenPreview,
+    s.setFullscreenPreview,
+    s.assets,
+    s.updateAssetProperty,
+    s.assetDetail,
+    s.setAssetDetail,
+  ])))
 
   const [zoom, setZoom] = useState(1)
+  const [displayScale, setDisplayScale] = useState(1)
   const [fullPreviewPath, setFullPreviewPath] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const previewFetchInFlightRef = useRef<string | null>(null)
@@ -43,6 +71,7 @@ export function Lightbox() {
   // Reset zoom when switching assets
   useEffect(() => {
     resetTransform()
+    setDisplayScale(1)
   }, [previewAsset?.id, resetTransform])
 
   useEffect(() => {
@@ -186,7 +215,7 @@ export function Lightbox() {
   if (!previewAsset || !isFullscreenPreview) return null
 
   const currentIndex = assets.findIndex(a => a.id === previewAsset.id)
-  const zoomPercent = Math.round(zoom * 100)
+  const zoomPercent = Math.round(displayScale * 100)
   const previewExt = getFileExt(previewAsset.name)
   const shouldPreferThumbnail = THUMBNAIL_FIRST_EXTENSIONS.has(previewExt) && !fullPreviewPath
 
@@ -201,6 +230,9 @@ export function Lightbox() {
             preferThumbnail={shouldPreferThumbnail}
             zoom={zoom}
             onZoomChange={setZoom}
+            onDisplayScaleChange={(scale) => {
+              setDisplayScale(prev => (Math.abs(prev - scale) < 0.001 ? prev : scale))
+            }}
           />
         )
       case 'pdf':
@@ -298,7 +330,9 @@ export function Lightbox() {
         className="w-full h-full pt-12 pb-4 px-12 overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
-          {renderViewer()}
+          <Suspense fallback={<div className="flex h-full items-center justify-center text-white/60">正在加载预览...</div>}>
+            {renderViewer()}
+          </Suspense>
       </motion.div>
 
         {/* Bottom hint */}

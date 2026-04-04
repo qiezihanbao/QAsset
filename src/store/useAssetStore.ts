@@ -87,6 +87,7 @@ export interface AssetFilters {
   sort_order: string
   page: number
   page_size: number
+  skip_total_count?: boolean
 }
 
 // ─── Legacy type alias for backward compatibility ────────────────────
@@ -328,12 +329,12 @@ export const useAssetStore = create<AssetStore>((set) => ({
   addWorkspace: (name) => set((state) => ({
     workspaces: [...state.workspaces, { id: Math.random().toString(36).substr(2, 9), name }]
   })),
-  assignAssetToWorkspace: (_assetId, _workspaceId) => {
+  assignAssetToWorkspace: () => {
     // Workspace assignment now goes through the backend (update_asset).
     // The lightweight AssetLite items don't carry workspace_ids, so we
     // no longer update them in-place here. Kept for API compatibility.
   },
-  removeAssetFromWorkspace: (_assetId, _workspaceId) => {
+  removeAssetFromWorkspace: () => {
     // Same as above — delegated to the backend.
   },
 

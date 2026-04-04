@@ -11,7 +11,8 @@ interface MarkdownViewerProps {
   fileName: string
 }
 
-export function MarkdownViewer({ filePath, fileName: _fileName }: MarkdownViewerProps) {
+export function MarkdownViewer({ filePath, fileName }: MarkdownViewerProps) {
+  void fileName
   const [content, setContent] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 

@@ -1,18 +1,22 @@
 import { useState, useEffect } from "react"
-import { ExternalLink, Star, Plus, X, Check } from "lucide-react"
+import { ExternalLink, Star, Plus, X } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import { useAssetStore, getSafeArray } from "@/store/useAssetStore"
 import { isMobile } from "@/lib/utils"
 import type { AssetDetail } from "@/store/useAssetStore"
+import { useShallow } from "zustand/react/shallow"
 
 const hasTauriRuntime = () => Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__)
 const notifyAssetsRefresh = () => window.dispatchEvent(new Event('quickasset:refresh-assets'))
 
 export function RightSidebar() {
-  const {
+  const [
     assets, selectedAssets, workspaces, assetDetail, setAssetDetail,
-    updateAssetProperty, setSimilarAssetIds, toggleRightSidebar, tagsSummary
-  } = useAssetStore()
+    updateAssetProperty, setSimilarAssetIds, toggleRightSidebar, tagsSummary,
+  ] = useAssetStore(useShallow((s) => ([
+    s.assets, s.selectedAssets, s.workspaces, s.assetDetail, s.setAssetDetail,
+    s.updateAssetProperty, s.setSimilarAssetIds, s.toggleRightSidebar, s.tagsSummary,
+  ])))
   const selectedAsset = assets.find((asset) => asset.id === selectedAssets[0]) ?? null
   const [descInput, setDescInput] = useState("")
   const [sourceUrlInput, setSourceUrlInput] = useState("")
@@ -38,7 +42,7 @@ export function RightSidebar() {
     } else {
       setAssetDetail(null)
     }
-  }, [selectedAsset?.id])
+  }, [selectedAsset, setAssetDetail])
 
   if (!selectedAsset) {
     return (
@@ -55,7 +59,7 @@ export function RightSidebar() {
               <X className="h-4 w-4" />
             </button>
           )}
-          <p className="text-sm">Select an asset to view properties</p>
+          <p className="text-sm">请选择一个资产查看属性</p>
         </div>
       </aside>
     )

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { FolderOpen, Plus, Clock } from 'lucide-react'
-import { useAssetStore, type RegistryEntry } from '@/store/useAssetStore'
+import { useAssetStore } from '@/store/useAssetStore'
 
 export function WelcomePage({ onOpenLibrary }: { onOpenLibrary: (path: string) => void }) {
   const { recentLibraries } = useAssetStore()
@@ -16,11 +16,11 @@ export function WelcomePage({ onOpenLibrary }: { onOpenLibrary: (path: string) =
       const path = await open({ directory: true, title: '选择素材库位置' })
       if (!path || typeof path !== 'string') return
 
-      const name = libraryName.trim() || 'My Library'
+      const name = libraryName.trim() || '我的素材库'
       await invoke('create_library', { path, name })
       onOpenLibrary(path)
-    } catch (e: any) {
-      setError(e?.toString() || '创建素材库失败')
+    } catch (e: unknown) {
+      setError(String(e) || '创建素材库失败')
     }
   }
 
@@ -30,8 +30,8 @@ export function WelcomePage({ onOpenLibrary }: { onOpenLibrary: (path: string) =
       const path = await open({ directory: true, title: '选择素材库文件夹' })
       if (!path || typeof path !== 'string') return
       onOpenLibrary(path)
-    } catch (e: any) {
-      setError(e?.toString() || '打开素材库失败')
+    } catch (e: unknown) {
+      setError(String(e) || '打开素材库失败')
     }
   }
 

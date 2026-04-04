@@ -1,9 +1,10 @@
 import { Search, LayoutGrid, List, LayoutDashboard } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useAssetStore } from "@/store/useAssetStore"
+import { useShallow } from "zustand/react/shallow"
 
 export function TopNav() {
-  const { searchQuery, setSearchQuery } = useAssetStore()
+  const [searchQuery, setSearchQuery] = useAssetStore(useShallow((s) => [s.searchQuery, s.setSearchQuery]))
 
   return (
     <header className="flex h-14 items-center justify-between border-b border-zinc-200 dark:border-zinc-800 px-4 shrink-0">
@@ -11,8 +12,8 @@ export function TopNav() {
         <div className="font-semibold text-lg tracking-tight">QuickAsset</div>
         <div className="h-4 w-px bg-zinc-200 dark:bg-zinc-800" />
         <select className="bg-transparent text-sm font-medium focus:outline-none border-none cursor-pointer">
-          <option>Default Library</option>
-          <option>Project A</option>
+          <option>默认素材库</option>
+          <option>项目 A</option>
         </select>
       </div>
 
@@ -23,7 +24,7 @@ export function TopNav() {
             type="search"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search assets (name)..."
+            placeholder="搜索资产（名称）..."
             className="w-full rounded-md border border-zinc-200 dark:border-zinc-800 bg-zinc-100 dark:bg-zinc-900 px-8 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-zinc-300 dark:focus:ring-zinc-700"
           />
         </div>

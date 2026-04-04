@@ -123,6 +123,22 @@ export function PdfViewer({ filePath }: PdfViewerProps) {
     return () => { cancelled = true }
   }, [pdfDoc, currentPage, scale, doublePage, totalPages])
 
+  const goToPage = useCallback((page: number) => {
+    const start = offsetByOne && doublePage ? 0 : 1
+    // Ensure page snaps to correct parity for double-page mode
+    let target = Math.max(start, Math.min(page, totalPages))
+    if (doublePage) {
+      // For double page, currentPage should always be odd (1, 3, 5...) in normal mode
+      // or even (2, 4, 6...) in offset mode
+      if (offsetByOne) {
+        if (target % 2 !== 0) target = Math.max(2, target - 1)
+      } else {
+        if (target % 2 === 0) target = Math.max(1, target - 1)
+      }
+    }
+    setCurrentPage(target)
+  }, [totalPages, doublePage, offsetByOne])
+
   // Keyboard shortcuts for page navigation
   useEffect(() => {
     const step = doublePage ? 2 : 1
@@ -141,24 +157,7 @@ export function PdfViewer({ filePath }: PdfViewerProps) {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [currentPage, totalPages, doublePage])
-
-  const goToPage = useCallback((page: number) => {
-    const step = doublePage ? 2 : 1
-    const start = offsetByOne && doublePage ? 0 : 1
-    // Ensure page snaps to correct parity for double-page mode
-    let target = Math.max(start, Math.min(page, totalPages))
-    if (doublePage) {
-      // For double page, currentPage should always be odd (1, 3, 5...) in normal mode
-      // or even (2, 4, 6...) in offset mode
-      if (offsetByOne) {
-        if (target % 2 !== 0) target = Math.max(2, target - 1)
-      } else {
-        if (target % 2 === 0) target = Math.max(1, target - 1)
-      }
-    }
-    setCurrentPage(target)
-  }, [totalPages, doublePage, offsetByOne])
+  }, [currentPage, doublePage, goToPage])
 
   const handleZoomIn = useCallback(() => {
     setScale(s => Math.min(s + 0.2, 3))

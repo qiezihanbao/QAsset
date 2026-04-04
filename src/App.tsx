@@ -1,96 +1,52 @@
-import { useEffect, useState, useRef } from "react"
+import { useEffect, useState, useRef, lazy, Suspense, useCallback } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import { MainLayout } from "@/components/layout/MainLayout"
-import { RightSidebar } from "@/components/layout/RightSidebar"
 import { AssetsPage } from "@/pages/AssetsPage"
-import { useAssetStore, type AssetLite, type LibraryConfig } from "@/store/useAssetStore"
-import { Lightbox } from "@/components/Lightbox"
-import { WelcomePage } from "@/pages/WelcomePage"
+import { useAssetStore, type LibraryConfig, type RegistryEntry } from "@/store/useAssetStore"
 
-const LARGE_PAGE_SIZE = 10000
+const RightSidebar = lazy(() =>
+  import("@/components/layout/RightSidebar").then((m) => ({ default: m.RightSidebar }))
+)
+const Lightbox = lazy(() =>
+  import("@/components/Lightbox").then((m) => ({ default: m.Lightbox }))
+)
+const WelcomePage = lazy(() =>
+  import("@/pages/WelcomePage").then((m) => ({ default: m.WelcomePage }))
+)
+
+type AppWindow = Window & {
+  __TAURI_INTERNALS__?: unknown
+  __TAURI__?: unknown
+  __openLibrary?: (path: string) => Promise<void>
+  __loadAssets?: () => Promise<void> | void
+}
+
+const getAppWindow = () => window as AppWindow
+const hasTauriRuntime = () => {
+  const w = getAppWindow()
+  return Boolean(w.__TAURI_INTERNALS__ || w.__TAURI__)
+}
 
 function App() {
-  const {
-    currentLibrary, isLoadingLibrary, setCurrentLibrary, setRecentLibraries,
-    setIsLoadingLibrary, setAssets, setPagination, resetForNewLibrary,
-    isRightSidebarVisible, toggleLeftSidebar, toggleRightSidebar
-  } = useAssetStore()
+  const currentLibrary = useAssetStore((s) => s.currentLibrary)
+  const isLoadingLibrary = useAssetStore((s) => s.isLoadingLibrary)
+  const setCurrentLibrary = useAssetStore((s) => s.setCurrentLibrary)
+  const setRecentLibraries = useAssetStore((s) => s.setRecentLibraries)
+  const setIsLoadingLibrary = useAssetStore((s) => s.setIsLoadingLibrary)
+  const resetForNewLibrary = useAssetStore((s) => s.resetForNewLibrary)
+  const isRightSidebarVisible = useAssetStore((s) => s.isRightSidebarVisible)
 
   const [isInitialized, setIsInitialized] = useState(false)
   const [migrateProgress, setMigrateProgress] = useState<{ migrated: number; total: number } | null>(null)
   const fsEventTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  useEffect(() => {
-    initApp()
+  const loadAssets = useCallback(async () => {
+    window.dispatchEvent(new Event('quickasset:refresh-assets'))
   }, [])
 
-  async function initApp() {
-    if (!window.__TAURI_INTERNALS__ && !window.__TAURI__) {
-      setIsInitialized(true)
-      return
-    }
-
-    try {
-      const recents = await invoke('get_recent_libraries') as any[]
-      setRecentLibraries(recents)
-
-      if (recents.length > 0) {
-        const lastLib = recents[0]
-        await openLibrary(lastLib.path)
-      }
-    } catch (e) {
-      console.error('Failed to init:', e)
-    }
-    setIsInitialized(true)
-  }
-
-  async function openLibrary(path: string) {
-    setIsLoadingLibrary(true)
-    resetForNewLibrary()
-    try {
-      const config = await invoke<LibraryConfig>('open_library_cmd', { path })
-      setCurrentLibrary(config, path)
-      await loadAssets()
-
-      // Start file watcher for this library
-      try {
-        await invoke('start_watcher')
-      } catch (e) {
-        console.warn('Failed to start file watcher:', e)
-      }
-
-      // Check for images that need hash migration and run in background
-      runHashMigrationIfNeeded()
-    } catch (e) {
-      console.error('Failed to open library:', e)
-    }
-    setIsLoadingLibrary(false)
-  }
-
-  async function loadAssets() {
-    try {
-      const result = await invoke('query_assets', {
-        filters: {
-          sort_field: 'created_at',
-          sort_order: 'desc',
-          page: 1,
-          page_size: LARGE_PAGE_SIZE,
-        }
-      }) as any
-      setAssets(result.items as AssetLite[])
-      setPagination({
-        totalCount: result.total_count,
-        page: 1,
-        hasMore: (result.items as any[]).length < result.total_count,
-      })
-    } catch (e) {
-      console.error('Failed to load assets:', e)
-    }
-  }
-
-  async function runHashMigrationIfNeeded() {
-    if (!(window.__TAURI_INTERNALS__ || window.__TAURI__)) return
+  const runHashMigrationIfNeeded = useCallback(async () => {
+    if (!hasTauriRuntime()) return
     try {
       const count = await invoke<number>('migrate_hashed')
       if (count > 0) {
@@ -101,22 +57,83 @@ function App() {
     } catch (e) {
       console.warn('Hash migration failed or was not needed:', e)
     }
-  }
+  }, [loadAssets])
+
+  const runThumbnailRepairIfNeeded = useCallback(async () => {
+    if (!hasTauriRuntime()) return
+    try {
+      const repaired = await invoke<number>('repair_missing_thumbnails', { limit: 1200 })
+      if (repaired > 0) {
+        console.log(`Thumbnail repair completed: ${repaired} assets repaired`)
+        await loadAssets()
+      }
+    } catch (e) {
+      console.warn('Thumbnail repair failed or not needed:', e)
+    }
+  }, [loadAssets])
+
+  const openLibrary = useCallback(async (path: string) => {
+    setIsLoadingLibrary(true)
+    resetForNewLibrary()
+    try {
+      const config = await invoke<LibraryConfig>('open_library_cmd', { path })
+      setCurrentLibrary(config, path)
+
+      // Start file watcher for this library
+      try {
+        await invoke('start_watcher')
+      } catch (e) {
+        console.warn('Failed to start file watcher:', e)
+      }
+
+      // Check for images that need hash migration and run in background
+      runHashMigrationIfNeeded()
+      runThumbnailRepairIfNeeded()
+    } catch (e) {
+      console.error('Failed to open library:', e)
+    }
+    setIsLoadingLibrary(false)
+  }, [resetForNewLibrary, runHashMigrationIfNeeded, runThumbnailRepairIfNeeded, setCurrentLibrary, setIsLoadingLibrary])
+
+  const initApp = useCallback(async () => {
+    if (!hasTauriRuntime()) {
+      setIsInitialized(true)
+      return
+    }
+
+    try {
+      const recents = await invoke<RegistryEntry[]>('get_recent_libraries')
+      setRecentLibraries(recents)
+
+      if (recents.length > 0) {
+        const lastLib = recents[0]
+        await openLibrary(lastLib.path)
+      }
+    } catch (e) {
+      console.error('Failed to init:', e)
+    }
+    setIsInitialized(true)
+  }, [openLibrary, setRecentLibraries])
+
+  useEffect(() => {
+    initApp()
+  }, [initApp])
 
   // Lightweight refresh: only reload the asset list (no full scan)
-  async function lightweightRefresh() {
+  const lightweightRefresh = useCallback(async () => {
     try {
       await loadAssets()
     } catch (e) {
       console.error('Lightweight refresh failed:', e)
     }
-  }
+  }, [loadAssets])
 
   // Expose openLibrary and loadAssets for child components
   useEffect(() => {
-    ;(window as any).__openLibrary = openLibrary
-    ;(window as any).__loadAssets = loadAssets
-  }, [])
+    const appWindow = getAppWindow()
+    appWindow.__openLibrary = openLibrary
+    appWindow.__loadAssets = loadAssets
+  }, [loadAssets, openLibrary])
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -150,10 +167,10 @@ function App() {
     let unlistenFs: (() => void) | undefined;
     let unlistenMigrate: (() => void) | undefined;
 
-    if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
+    if (hasTauriRuntime()) {
       try {
-        listen('tauri://file-drop', async (event: any) => {
-          const filePaths = event.payload as string[];
+        listen<string[]>('tauri://file-drop', async (event) => {
+          const filePaths = event.payload;
           if (filePaths && filePaths.length > 0) {
             console.log('Files dropped:', filePaths);
             try {
@@ -182,8 +199,8 @@ function App() {
         }).then(u => unlistenFs = u);
 
         // Hash migration progress listener
-        listen('migrate-progress', (event: any) => {
-          const payload = event.payload as { migrated: number; total: number }
+        listen<{ migrated: number; total: number }>('migrate-progress', (event) => {
+          const payload = event.payload
           setMigrateProgress(payload)
           // Clear progress when done
           if (payload.migrated >= payload.total) {
@@ -207,20 +224,24 @@ function App() {
         clearTimeout(fsEventTimerRef.current)
       }
     }
-  }, []);
+  }, [lightweightRefresh, loadAssets]);
 
   // Loading state
   if (isLoadingLibrary) {
     return (
       <div className="flex items-center justify-center h-screen bg-zinc-50 dark:bg-zinc-950">
-        <div className="text-zinc-500">Loading library...</div>
+        <div className="text-zinc-500">正在加载素材库...</div>
       </div>
     )
   }
 
   // If no library and initialized, show welcome
-  if (isInitialized && !currentLibrary && (window.__TAURI_INTERNALS__ || window.__TAURI__)) {
-    return <WelcomePage onOpenLibrary={openLibrary} />
+  if (isInitialized && !currentLibrary && hasTauriRuntime()) {
+    return (
+      <Suspense fallback={<div className="flex items-center justify-center h-screen text-zinc-500">正在加载...</div>}>
+        <WelcomePage onOpenLibrary={openLibrary} />
+      </Suspense>
+    )
   }
 
   // Not yet initialized (non-Tauri) or library is open
@@ -229,9 +250,15 @@ function App() {
       <div className="flex flex-1 overflow-hidden">
         <main className="relative flex-1 flex flex-col min-w-0 overflow-hidden bg-white dark:bg-[#121212]">
           <AssetsPage />
-          <Lightbox />
+          <Suspense fallback={null}>
+            <Lightbox />
+          </Suspense>
         </main>
-        {isRightSidebarVisible && <RightSidebar />}
+        {isRightSidebarVisible && (
+          <Suspense fallback={null}>
+            <RightSidebar />
+          </Suspense>
+        )}
       </div>
 
       {/* Hash Migration Progress Bar */}
@@ -240,7 +267,7 @@ function App() {
           <div className="max-w-md mx-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg p-3">
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                Migrating image hashes...
+                正在迁移图片哈希...
               </span>
               <span className="text-xs text-zinc-500">
                 {migrateProgress.migrated}/{migrateProgress.total}

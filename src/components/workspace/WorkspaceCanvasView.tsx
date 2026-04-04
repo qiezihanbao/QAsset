@@ -497,7 +497,7 @@ export function WorkspaceCanvasView({
   return (
     <div
       ref={viewportRef}
-      className={`relative h-full w-full overflow-hidden ${
+      className={`relative h-full w-full overflow-hidden select-none ${
         isPanning ? "cursor-grabbing" : isSpacePressed ? "cursor-grab" : "cursor-crosshair"
       }`}
       onPointerDown={handleCanvasPointerDown}

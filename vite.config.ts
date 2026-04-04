@@ -12,6 +12,23 @@ export default defineConfig({
   },
   build: {
     sourcemap: 'hidden',
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return
+
+          if (id.includes("pdfjs-dist")) return "vendor-pdf"
+          if (
+            id.includes("react-markdown") ||
+            id.includes("remark-gfm") ||
+            id.includes("rehype-highlight")
+          ) return "vendor-markdown"
+          if (id.includes("highlight.js")) return "vendor-highlight"
+          if (id.includes("framer-motion")) return "vendor-motion"
+          if (id.includes("@tauri-apps")) return "vendor-tauri"
+        },
+      },
+    },
   },
   plugins: [
     react({

@@ -3,7 +3,6 @@ use crate::library;
 use tauri::{Emitter, Manager, State};
 use notify::Watcher;
 use image::GenericImageView;
-use rusqlite::OptionalExtension;
 use std::path::{Path, PathBuf};
 use image_hasher;
 
@@ -26,6 +25,21 @@ fn needs_transcoded_preview(path_or_name: &str) -> bool {
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_default();
     matches!(ext.as_str(), "psd" | "psb" | "clip")
+}
+
+fn build_fts_query(raw: &str) -> Option<String> {
+    let tokens: Vec<String> = raw
+        .split_whitespace()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{}\"*", t.replace('"', "\"\"")))
+        .collect();
+
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" AND "))
+    }
 }
 
 fn sampled_image_quality(img: &image::DynamicImage) -> (f32, u8) {
@@ -226,6 +240,16 @@ pub async fn query_assets(
 
     tokio::task::spawn_blocking(move || {
         let conn = library::get_db_connection(&db_path)?;
+        let has_assets_fts: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'assets_fts'",
+                [],
+                |row| {
+                    let count: i64 = row.get(0)?;
+                    Ok(count > 0)
+                },
+            )
+            .unwrap_or(false);
 
         // Build dynamic WHERE clause
         let mut where_clauses: Vec<String> = Vec::new();
@@ -233,8 +257,26 @@ pub async fn query_assets(
 
         if let Some(ref sq) = filters.search_query {
             if !sq.is_empty() {
-                where_clauses.push("name LIKE '%' || ? || '%'".to_string());
-                param_values.push(Box::new(sq.clone()));
+                if has_assets_fts {
+                    if let Some(fts_query) = build_fts_query(sq) {
+                        where_clauses.push(
+                            "EXISTS (
+                                SELECT 1
+                                FROM assets_fts
+                                WHERE assets_fts.asset_id = assets.id
+                                  AND assets_fts MATCH ?
+                            )"
+                            .to_string(),
+                        );
+                        param_values.push(Box::new(fts_query));
+                    } else {
+                        where_clauses.push("name LIKE '%' || ? || '%'".to_string());
+                        param_values.push(Box::new(sq.clone()));
+                    }
+                } else {
+                    where_clauses.push("name LIKE '%' || ? || '%'".to_string());
+                    param_values.push(Box::new(sq.clone()));
+                }
             }
         }
 
@@ -256,8 +298,15 @@ pub async fn query_assets(
         }
 
         if let Some(ref ws_id) = filters.workspace_id {
-            where_clauses.push("workspace_ids LIKE ?".to_string());
-            param_values.push(Box::new(format!("%\"{}\"%", ws_id)));
+            where_clauses.push(
+                "EXISTS (
+                    SELECT 1
+                    FROM asset_workspaces AS aw
+                    WHERE aw.asset_id = assets.id AND aw.workspace_id = ?
+                )"
+                .to_string(),
+            );
+            param_values.push(Box::new(ws_id.clone()));
         }
 
         if let Some(ref folder) = filters.folder_path {
@@ -316,15 +365,28 @@ pub async fn query_assets(
         if let Some(ref tags) = filters.tags {
             if !tags.is_empty() {
                 for tag in tags {
-                    where_clauses.push("tags LIKE ?".to_string());
-                    param_values.push(Box::new(format!("%\"{}\"%", tag)));
+                    where_clauses.push(
+                        "EXISTS (
+                            SELECT 1
+                            FROM asset_tags AS at
+                            WHERE at.asset_id = assets.id AND at.tag = ?
+                        )"
+                        .to_string(),
+                    );
+                    param_values.push(Box::new(tag.clone()));
                 }
             }
         }
 
         if filters.unorganized == Some(true) {
-            where_clauses.push("(tags IS NULL OR tags = '[]' OR tags = '')".to_string());
-            where_clauses.push("(workspace_ids IS NULL OR workspace_ids = '[]' OR workspace_ids = '')".to_string());
+            where_clauses.push(
+                "NOT EXISTS (SELECT 1 FROM asset_tags AS at WHERE at.asset_id = assets.id)"
+                    .to_string(),
+            );
+            where_clauses.push(
+                "NOT EXISTS (SELECT 1 FROM asset_workspaces AS aw WHERE aw.asset_id = assets.id)"
+                    .to_string(),
+            );
         }
 
         let where_sql = if where_clauses.is_empty() {
@@ -344,15 +406,20 @@ pub async fn query_assets(
         };
         let sort_order = if filters.sort_order == "asc" { "ASC" } else { "DESC" };
 
-        // Count total
-        let count_sql = format!("SELECT COUNT(*) FROM assets {}", where_sql);
-        let count_params: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-        let total_count: u32 = conn.query_row(&count_sql, count_params.as_slice(), |row| row.get(0))
-            .map_err(|e| format!("Count query failed: {}", e))?;
+        // Count total only when explicitly needed (usually first page).
+        let total_count: u32 = if filters.skip_total_count == Some(true) {
+            0
+        } else {
+            let count_sql = format!("SELECT COUNT(*) FROM assets {}", where_sql);
+            let count_params: Vec<&dyn rusqlite::types::ToSql> =
+                param_values.iter().map(|p| p.as_ref()).collect();
+            conn.query_row(&count_sql, count_params.as_slice(), |row| row.get(0))
+                .map_err(|e| format!("Count query failed: {}", e))?
+        };
 
         // Query page
         let query_sql = format!(
-            "SELECT id, name, path, asset_type, size, dominant_color, width, height, created_at, modified_at, rating, is_trashed, relative_path \
+            "SELECT id, name, path, asset_type, size, dominant_color, width, height, created_at, modified_at, rating, is_trashed, thumbnail_mtime, relative_path \
              FROM assets {} ORDER BY {} {} LIMIT ? OFFSET ?",
             where_sql, sort_field, sort_order
         );
@@ -366,9 +433,10 @@ pub async fn query_assets(
         let mut stmt = conn.prepare(&query_sql).map_err(|e| format!("Query prepare failed: {}", e))?;
         let rows = stmt.query_map(query_params.as_slice(), |row| {
             let is_trashed_i32: i32 = row.get(11)?;
-            let relative_path: String = row.get(12)?;
-            let thumb_path = crate::thumbnails::thumbnail_abs_path(&library_root, &relative_path);
-            let thumbnail_path = if thumb_path.exists() {
+            let thumbnail_mtime: Option<i64> = row.get(12)?;
+            let relative_path: String = row.get(13)?;
+            let thumbnail_path = if thumbnail_mtime.is_some() {
+                let thumb_path = crate::thumbnails::thumbnail_abs_path(&library_root, &relative_path);
                 Some(thumb_path.to_string_lossy().to_string())
             } else {
                 None
@@ -523,6 +591,115 @@ pub async fn ensure_asset_thumbnail(
             Ok(None)
         }
     }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn repair_missing_thumbnails(
+    limit: Option<u32>,
+    state: State<'_, crate::library::AppState>,
+) -> Result<u32, String> {
+    let db_path = get_db_path(&state)?;
+    let library_root = get_library_root(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        let conn = library::get_db_connection(&db_path)?;
+        let max_items = limit.unwrap_or(1200).clamp(1, 20_000) as i64;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, path, relative_path, asset_type
+                 FROM assets
+                 WHERE thumbnail_mtime IS NOT NULL
+                   AND asset_type IN ('image', 'video')
+                 ORDER BY modified_at DESC
+                 LIMIT ?1",
+            )
+            .map_err(|e| format!("Prepare failed: {}", e))?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![max_items], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| format!("Query failed: {}", e))?;
+
+        let mut repaired: u32 = 0;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Transaction begin failed: {}", e))?;
+        let mut update_stmt = tx
+            .prepare(
+                "UPDATE assets
+                 SET dominant_color = ?1, width = ?2, height = ?3, p_hash = ?4, thumbnail_mtime = ?5
+                 WHERE id = ?6",
+            )
+            .map_err(|e| format!("Prepare update failed: {}", e))?;
+        let mut clear_stmt = tx
+            .prepare("UPDATE assets SET thumbnail_mtime = NULL WHERE id = ?1")
+            .map_err(|e| format!("Prepare clear failed: {}", e))?;
+
+        for row in rows {
+            let (id, abs_path, relative_path, asset_type) =
+                row.map_err(|e: rusqlite::Error| format!("Row decode failed: {}", e))?;
+            let thumb_path = crate::thumbnails::thumbnail_abs_path(&library_root, &relative_path);
+            if thumb_path.exists() {
+                continue;
+            }
+
+            let file_path = std::path::Path::new(&abs_path);
+            if !file_path.exists() {
+                let _ = clear_stmt.execute(rusqlite::params![id]);
+                continue;
+            }
+
+            let processed = if asset_type == "video" {
+                crate::scanner::process_video(&library_root, &relative_path, file_path)
+            } else {
+                crate::scanner::process_image(&library_root, &relative_path, file_path)
+            };
+
+            if processed.thumbnail_mtime.is_none() {
+                let _ = clear_stmt.execute(rusqlite::params![id]);
+                continue;
+            }
+
+            let width = if processed.width > 0 {
+                Some(processed.width)
+            } else {
+                None
+            };
+            let height = if processed.height > 0 {
+                Some(processed.height)
+            } else {
+                None
+            };
+
+            update_stmt
+                .execute(rusqlite::params![
+                    processed.dominant_color,
+                    width,
+                    height,
+                    processed.p_hash,
+                    processed.thumbnail_mtime,
+                    id,
+                ])
+                .map_err(|e| format!("Thumbnail repair update failed: {}", e))?;
+            repaired = repaired.saturating_add(1);
+        }
+
+        drop(update_stmt);
+        drop(clear_stmt);
+        tx.commit()
+            .map_err(|e| format!("Repair commit failed: {}", e))?;
+
+        Ok(repaired)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -822,18 +999,6 @@ pub async fn get_folders(
         let mut folder_stmt = conn
             .prepare("SELECT path, parent_path, display_name, asset_count, COALESCE(show_subfolders, 1) FROM folders ORDER BY path")
             .map_err(|e| e.to_string())?;
-
-        let mut preview_stmt = conn
-            .prepare(
-                "SELECT path, relative_path, asset_type
-                 FROM assets
-                 WHERE REPLACE(relative_path, char(92), '/') LIKE ?1
-                   AND asset_type IN ('image', 'video')
-                 ORDER BY modified_at DESC
-                 LIMIT 1",
-            )
-            .map_err(|e| e.to_string())?;
-
         let rows = folder_stmt
             .query_map([], |row| {
                 Ok((
@@ -846,35 +1011,117 @@ pub async fn get_folders(
             })
             .map_err(|e| e.to_string())?;
 
-        let mut folders = Vec::new();
+        let mut folder_rows = Vec::new();
+        let mut normalized_folder_set = std::collections::HashSet::new();
         for row in rows {
             let (path, parent_path, display_name, asset_count, show_subfolders_i32) =
                 row.map_err(|e: rusqlite::Error| e.to_string())?;
-
             let normalized_path = path.replace('\\', "/");
             let normalized_parent_path = parent_path.map(|p| p.replace('\\', "/"));
-            let like_pattern = format!("{}/%", normalized_path);
-            let preview_asset: Option<(String, String, String)> = preview_stmt
-                .query_row(rusqlite::params![like_pattern], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                })
-                .optional()
-                .map_err(|e| e.to_string())?;
+            normalized_folder_set.insert(normalized_path.clone());
+            folder_rows.push((
+                normalized_path,
+                normalized_parent_path,
+                display_name,
+                asset_count,
+                show_subfolders_i32,
+            ));
+        }
 
-            let mut preview_thumbnail_path: Option<String> = None;
-            let mut preview_asset_path: Option<String> = None;
-            let mut preview_asset_type: Option<String> = None;
-            if let Some((asset_path, relative_path, asset_type)) = preview_asset {
-                let thumb_path = crate::thumbnails::thumbnail_abs_path(&library_root, &relative_path);
-                if thumb_path.exists() {
-                    preview_thumbnail_path = Some(thumb_path.to_string_lossy().to_string());
-                }
-                if preview_thumbnail_path.is_none() && asset_type == "image" {
-                    preview_asset_path = Some(asset_path);
-                }
-                preview_asset_type = Some(asset_type);
+        let mut preview_by_folder: std::collections::HashMap<
+            String,
+            (Option<String>, Option<String>, Option<String>),
+        > = std::collections::HashMap::new();
+
+        let mut assets_stmt = conn
+            .prepare(
+                "SELECT path, relative_path, asset_type, thumbnail_mtime
+                 FROM assets
+                 WHERE asset_type IN ('image', 'video')
+                 ORDER BY modified_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let asset_rows = assets_stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let preview_target_count = normalized_folder_set.len();
+
+        for asset_row in asset_rows {
+            let (asset_path, relative_path, asset_type, thumbnail_mtime) =
+                asset_row.map_err(|e: rusqlite::Error| e.to_string())?;
+            let normalized_relative_path = relative_path.replace('\\', "/");
+            let Some(last_sep_idx) = normalized_relative_path.rfind('/') else {
+                continue;
+            };
+
+            let mut folder_cursor = normalized_relative_path[..last_sep_idx].to_string();
+            if folder_cursor.is_empty() {
+                continue;
             }
 
+            let preview_thumbnail_path = if thumbnail_mtime.is_some() {
+                // Keep compatibility with historical relative_path formats.
+                let thumb_from_raw = crate::thumbnails::thumbnail_abs_path(&library_root, &relative_path);
+                let thumb_from_normalized = crate::thumbnails::thumbnail_abs_path(&library_root, &normalized_relative_path);
+
+                if thumb_from_raw.exists() {
+                    Some(thumb_from_raw.to_string_lossy().to_string())
+                } else if thumb_from_normalized.exists() {
+                    Some(thumb_from_normalized.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let preview_asset_path = if preview_thumbnail_path.is_none() && asset_type == "image" {
+                Some(asset_path.clone())
+            } else {
+                None
+            };
+            let preview_payload = (
+                preview_thumbnail_path,
+                preview_asset_path,
+                Some(asset_type),
+            );
+
+            loop {
+                if normalized_folder_set.contains(&folder_cursor) {
+                    preview_by_folder
+                        .entry(folder_cursor.clone())
+                        .or_insert_with(|| preview_payload.clone());
+                }
+
+                if let Some(parent_idx) = folder_cursor.rfind('/') {
+                    folder_cursor.truncate(parent_idx);
+                    if folder_cursor.is_empty() {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            if preview_by_folder.len() >= preview_target_count {
+                break;
+            }
+        }
+
+        let mut folders = Vec::new();
+        for (normalized_path, normalized_parent_path, display_name, asset_count, show_subfolders_i32) in folder_rows {
+            let (preview_thumbnail_path, preview_asset_path, preview_asset_type) =
+                preview_by_folder
+                    .get(&normalized_path)
+                    .cloned()
+                    .unwrap_or((None, None, None));
             folders.push(serde_json::json!({
                 "path": normalized_path,
                 "parent_path": normalized_parent_path,
@@ -1110,26 +1357,20 @@ pub async fn get_tags_summary(
         let conn = library::get_db_connection(&db_path)?;
 
         let mut stmt = conn
-            .prepare("SELECT tags FROM assets WHERE tags IS NOT NULL AND tags != ''")
+            .prepare("SELECT tag, COUNT(*) FROM asset_tags GROUP BY tag")
             .map_err(|e| e.to_string())?;
 
         let rows = stmt
             .query_map([], |row| {
-                let tags_str: String = row.get(0)?;
-                Ok(tags_str)
+                Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
             })
             .map_err(|e| e.to_string())?;
 
         let mut tag_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
 
         for row in rows {
-            let tags_str = row.map_err(|e: rusqlite::Error| e.to_string())?;
-            // Parse JSON array string like ["tag1","tag2"]
-            if let Ok(tags_vec) = serde_json::from_str::<Vec<String>>(&tags_str) {
-                for tag in tags_vec {
-                    *tag_counts.entry(tag).or_insert(0) += 1;
-                }
-            }
+            let (tag, count) = row.map_err(|e: rusqlite::Error| e.to_string())?;
+            tag_counts.insert(tag, count);
         }
 
         Ok(tag_counts)

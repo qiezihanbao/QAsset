@@ -1,15 +1,19 @@
 import { useEffect } from "react"
 import { useAssetStore } from "@/store/useAssetStore"
+import { useShallow } from "zustand/react/shallow"
 
 export function TagsView() {
-  const { setActiveView, setTagFilter, tagsSummary, isLoadingTagsSummary, refreshTagsSummary } = useAssetStore()
+  const [setActiveView, setTagFilter, tagsSummary, isLoadingTagsSummary, refreshTagsSummary] =
+    useAssetStore(useShallow(
+      (s) => [s.setActiveView, s.setTagFilter, s.tagsSummary, s.isLoadingTagsSummary, s.refreshTagsSummary]
+    ))
 
   useEffect(() => {
     // Only fetch if we don't have data yet
     if (Object.keys(tagsSummary).length === 0) {
       refreshTagsSummary()
     }
-  }, [])
+  }, [refreshTagsSummary, tagsSummary])
 
   // Group tags by first letter (Pinyin/English)
   const getFirstChar = (str: string) => {
@@ -39,7 +43,7 @@ export function TagsView() {
         <div className="flex-1 flex items-center justify-center text-zinc-500">
           <div className="flex flex-col items-center gap-3">
             <div className="w-6 h-6 border-2 border-zinc-300 border-t-indigo-500 rounded-full animate-spin" />
-            <span>Loading tags...</span>
+            <span>正在加载标签...</span>
           </div>
         </div>
       </div>

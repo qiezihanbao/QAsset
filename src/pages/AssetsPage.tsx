@@ -1,24 +1,70 @@
-import { Image as ImageIcon, FileText, Video, Box, ChevronLeft, ChevronRight, Filter, Grid, List, Search, ChevronDown, Columns, FolderOpen, Folder, Trash2, Copy, Edit2, MoveRight, PlusCircle, Tag, Image, Link, Star, HardDrive, Maximize2 } from "lucide-react"
-import { useAssetStore, AssetLite, AssetFilters } from "@/store/useAssetStore"
+import { Image as ImageIcon, FileText, Video, Box, ChevronLeft, ChevronRight, Filter, Grid, Search, ChevronDown, Columns, FolderOpen, Folder, Trash2, Copy, Edit2, MoveRight, PlusCircle, Tag, Image, Link, Star, HardDrive, Maximize2 } from "lucide-react"
+import { useAssetStore, AssetLite, AssetFilters, type AssetDetail, type Workspace, type ViewType } from "@/store/useAssetStore"
 import * as ContextMenu from '@radix-ui/react-context-menu'
 import { invoke } from "@tauri-apps/api/core"
 import { convertFileSrc } from "@tauri-apps/api/core"
-import { TagsView } from "./TagsView"
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useRef, useMemo, useEffect, useState, useCallback } from 'react'
+import { useRef, useMemo, useEffect, useState, useCallback, lazy, Suspense } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import Selecto from "react-selecto"
-import { ColorWheelPicker } from "@/components/ColorWheelPicker"
-import { WorkspaceCanvasView } from "@/components/workspace/WorkspaceCanvasView"
 
-const safeInvoke = async (command: string, args?: any) => {
-  if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
-    return await invoke(command, args)
-  }
-  console.warn(`Tauri not available, skipped: ${command}`, args)
+const TagsView = lazy(() =>
+  import("./TagsView").then((m) => ({ default: m.TagsView }))
+)
+const ColorWheelPicker = lazy(() =>
+  import("@/components/ColorWheelPicker").then((m) => ({ default: m.ColorWheelPicker }))
+)
+const WorkspaceCanvasView = lazy(() =>
+  import("@/components/workspace/WorkspaceCanvasView").then((m) => ({ default: m.WorkspaceCanvasView }))
+)
+
+type QuickAssetWindow = Window & {
+  __TAURI_INTERNALS__?: unknown
+  __TAURI__?: unknown
+  __loadAssets?: () => Promise<void> | void
 }
 
-const isTauri = () => !!(window.__TAURI_INTERNALS__ || window.__TAURI__)
+const getQuickWindow = () => window as QuickAssetWindow
+
+const safeInvoke = async <T = unknown>(command: string, args?: Record<string, unknown>): Promise<T | undefined> => {
+  if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
+    return await invoke<T>(command, args)
+  }
+  console.warn(`Tauri not available, skipped: ${command}`, args)
+  return undefined
+}
+
+const isTauri = () => {
+  const appWindow = getQuickWindow()
+  return Boolean(appWindow.__TAURI_INTERNALS__ || appWindow.__TAURI__)
+}
 const THUMBNAIL_FIRST_EXTENSIONS = new Set(['psd', 'psb', 'clip'])
+const SEARCH_DEBOUNCE_MS = 250
+const INCREMENTAL_PAGE_SIZE = 300
+const FULL_FETCH_PAGE_SIZE = 10000
+const LOAD_MORE_THRESHOLD_PX = 900
+
+interface QueryAssetsResult {
+  total_count: number
+  items: AssetLite[]
+}
+
+interface AssetCardProps {
+  asset: AssetLite
+  isSelected: boolean
+  layoutMode: "grid" | "masonry" | "canvas"
+  workspaces: Workspace[]
+  onSelect: (e: React.MouseEvent) => void
+  onContextMenu: () => void
+  onPreview: () => void
+  onShowInFolder: () => void
+  onPreviewFolder: () => void
+  onSearchSimilar: () => void
+  onDelete: (hardDelete: boolean) => void
+  onAssignWorkspace: (workspaceId: string) => Promise<void> | void
+  onQuickAddTag?: () => void
+  activeView: ViewType
+}
 
 function getFileExt(fileNameOrPath: string): string {
   if (!fileNameOrPath.includes('.')) return ''
@@ -109,7 +155,7 @@ function getAssetIcon(type: string) {
   }
 }
 
-function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, onSelect, onContextMenu, onPreview, onShowInFolder, onPreviewFolder, onSearchSimilar, onDelete, onAssignWorkspace, onQuickAddTag, activeView }: any) {
+function AssetCard({ asset, isSelected, layoutMode, workspaces, onSelect, onContextMenu, onPreview, onShowInFolder, onPreviewFolder, onSearchSimilar, onDelete, onAssignWorkspace, onQuickAddTag, activeView }: AssetCardProps) {
   const [resolvedThumbnailPath, setResolvedThumbnailPath] = useState<string | null>(asset.thumbnail_path || null)
 
   useEffect(() => {
@@ -118,7 +164,9 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
 
   useEffect(() => {
     if (!isTauri()) return
-    if (asset.asset_type !== 'video') return
+    const ext = getFileExt(asset.name || asset.path)
+    const requiresThumbnail = asset.asset_type === 'video' || THUMBNAIL_FIRST_EXTENSIONS.has(ext)
+    if (!requiresThumbnail) return
     if (resolvedThumbnailPath) return
 
     let cancelled = false
@@ -136,7 +184,7 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
     return () => {
       cancelled = true
     }
-  }, [asset.id, asset.asset_type, resolvedThumbnailPath])
+  }, [asset.id, asset.asset_type, asset.name, asset.path, resolvedThumbnailPath])
 
   const handleCopyPath = async (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -164,7 +212,7 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
       try {
         await safeInvoke("rename_asset", { id: asset.id, newName })
         // Reload assets to reflect the rename
-        await (window as any).__loadAssets?.()
+        await getQuickWindow().__loadAssets?.()
       } catch (err) {
         alert("重命名失败: " + err)
       }
@@ -187,7 +235,7 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
             e.stopPropagation()
             onPreview?.()
           }}
-          className={`selectable-asset group flex flex-col items-center cursor-pointer break-inside-avoid ${layoutMode === 'masonry' ? 'mb-8' : ''}`}
+          className="selectable-asset group flex flex-col items-center cursor-pointer break-inside-avoid"
         >
           <div className={`relative w-full rounded-xl overflow-hidden transition-all duration-200 ${
             isSelected
@@ -293,7 +341,7 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
                 sideOffset={2}
                 alignOffset={-5}
               >
-                {workspaces && workspaces.length > 0 ? workspaces.map((ws: any) => (
+                {workspaces && workspaces.length > 0 ? workspaces.map((ws) => (
                   <ContextMenu.Item
                     key={ws.id}
                     onClick={() => onAssignWorkspace(ws.id)}
@@ -398,7 +446,7 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
 }
 
 export function AssetsPage() {
-  const {
+  const [
     assets, setSelectedAssets, selectedAssets, searchQuery, setSearchQuery,
     colorFilter, setColorFilter, typeFilter, setTypeFilter, tagFilter, setTagFilter,
     folderFilter, folderPreviewVisibility, setFolderFilter,
@@ -406,9 +454,19 @@ export function AssetsPage() {
     shapeFilter, setShapeFilter,
     activeView, activeWorkspaceId, setActiveView, workspaces, thumbnailSize, setThumbnailSize, layoutMode, setLayoutMode,
     sortConfig, setSortConfig, similarAssetIds, setSimilarAssetIds, setPreviewAsset,
-    removeAsset, updateAssetProperty, assetDetail, setAssets, setAssetDetail, currentLibraryPath,
-    tagsSummary, refreshTagsSummary
-  } = useAssetStore()
+    removeAsset, updateAssetProperty, assetDetail, setAssets, appendAssets, setAssetDetail, currentLibraryPath,
+    pagination, setPagination, tagsSummary, refreshTagsSummary,
+  ] = useAssetStore(useShallow((s) => ([
+    s.assets, s.setSelectedAssets, s.selectedAssets, s.searchQuery, s.setSearchQuery,
+    s.colorFilter, s.setColorFilter, s.typeFilter, s.setTypeFilter, s.tagFilter, s.setTagFilter,
+    s.folderFilter, s.folderPreviewVisibility, s.setFolderFilter,
+    s.sizeFilter, s.setSizeFilter, s.ratingFilter, s.setRatingFilter,
+    s.shapeFilter, s.setShapeFilter,
+    s.activeView, s.activeWorkspaceId, s.setActiveView, s.workspaces, s.thumbnailSize, s.setThumbnailSize, s.layoutMode, s.setLayoutMode,
+    s.sortConfig, s.setSortConfig, s.similarAssetIds, s.setSimilarAssetIds, s.setPreviewAsset,
+    s.removeAsset, s.updateAssetProperty, s.assetDetail, s.setAssets, s.appendAssets, s.setAssetDetail, s.currentLibraryPath,
+    s.pagination, s.setPagination, s.tagsSummary, s.refreshTagsSummary,
+  ])))
 
   const [isColorPickerOpen, setIsColorPickerOpen] = useState(false)
   const [isTagFilterOpen, setIsTagFilterOpen] = useState(false)
@@ -419,6 +477,10 @@ export function AssetsPage() {
   const [isSortOpen, setIsSortOpen] = useState(false)
   const [folders, setFolders] = useState<FolderInfo[]>([])
   const [refreshVersion, setRefreshVersion] = useState(0)
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState(searchQuery)
+  const [isLoadingPage, setIsLoadingPage] = useState(false)
+  const queryTokenRef = useRef(0)
+  const loadingPageRef = useRef(false)
   const sortMenuRef = useRef<HTMLDivElement>(null)
 
   const triggerRefresh = useCallback(() => {
@@ -441,6 +503,13 @@ export function AssetsPage() {
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [isSortOpen])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery.trim())
+    }, SEARCH_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [searchQuery])
 
   // Virtualization Logic for Grid Mode
   const parentRef = useRef<HTMLDivElement>(null)
@@ -471,57 +540,16 @@ export function AssetsPage() {
       // Range selection
       const lastSelectedId = selectedAssets[selectedAssets.length - 1];
 
-      if (layoutMode === 'masonry') {
-        // Spatial selection for Masonry
-        const allElements = document.querySelectorAll('.selectable-asset');
-        let lastEl: Element | null = null;
-        let currEl: Element | null = null;
+      const lastIndex = filteredAssets.findIndex(a => a.id === lastSelectedId);
+      const currentIndex = filteredAssets.findIndex(a => a.id === assetId);
 
-        allElements.forEach(el => {
-          const id = el.getAttribute('data-id');
-          if (id === lastSelectedId) lastEl = el;
-          if (id === assetId) currEl = el;
-        });
-
-        if (lastEl && currEl) {
-          const r1 = lastEl.getBoundingClientRect();
-          const r2 = currEl.getBoundingClientRect();
-
-          const minX = Math.min(r1.left, r2.left);
-          const maxX = Math.max(r1.right, r2.right);
-          const minY = Math.min(r1.top, r2.top);
-          const maxY = Math.max(r1.bottom, r2.bottom);
-
-          const rangeIds: string[] = [];
-          allElements.forEach(el => {
-            const r = el.getBoundingClientRect();
-            const centerX = r.left + r.width / 2;
-            const centerY = r.top + r.height / 2;
-
-            if (centerX >= minX && centerX <= maxX && centerY >= minY && centerY <= maxY) {
-              const id = el.getAttribute('data-id');
-              if (id) rangeIds.push(id);
-            }
-          });
-
-          setSelectedAssets(Array.from(new Set([...selectedAssets, ...rangeIds])));
-        } else {
-          setSelectedAssets([assetId]);
-        }
+      if (lastIndex !== -1 && currentIndex !== -1) {
+        const start = Math.min(lastIndex, currentIndex);
+        const end = Math.max(lastIndex, currentIndex);
+        const rangeIds = filteredAssets.slice(start, end + 1).map(a => a.id);
+        setSelectedAssets(Array.from(new Set([...selectedAssets, ...rangeIds])));
       } else {
-        // Array index selection for Grid (Virtualizer ensures visual order = array order)
-        const lastIndex = filteredAssets.findIndex(a => a.id === lastSelectedId);
-        const currentIndex = filteredAssets.findIndex(a => a.id === assetId);
-
-        if (lastIndex !== -1 && currentIndex !== -1) {
-          const start = Math.min(lastIndex, currentIndex);
-          const end = Math.max(lastIndex, currentIndex);
-          const rangeIds = filteredAssets.slice(start, end + 1).map(a => a.id);
-
-          setSelectedAssets(Array.from(new Set([...selectedAssets, ...rangeIds])));
-        } else {
-          setSelectedAssets([assetId]);
-        }
+        setSelectedAssets([assetId]);
       }
     } else {
       // Single select
@@ -534,20 +562,6 @@ export function AssetsPage() {
       setSelectedAssets([assetId]);
     }
   };
-
-  const handleRestoreAsset = async (id: string) => {
-    try {
-      updateAssetProperty(id, { is_trashed: false })
-      await safeInvoke("update_asset", {
-        id,
-        isTrashed: false,
-        is_trashed: false,
-      })
-      triggerRefresh()
-    } catch (err) {
-      console.error("Failed to restore asset:", err)
-    }
-  }
 
   const handleDeleteAsset = async (id: string, hardDelete: boolean = false) => {
     try {
@@ -621,7 +635,7 @@ export function AssetsPage() {
     if (newTags.length === 0) return
 
     try {
-      const detail = await safeInvoke("get_asset_detail", { id }) as any
+      const detail = await safeInvoke<AssetDetail>("get_asset_detail", { id })
       const existingTags = detail?.tags
         ? (() => {
             try {
@@ -667,6 +681,17 @@ export function AssetsPage() {
     : "全部文件"
   const isCanvasEnabled = activeView === 'workspace'
   const currentFolderPath = folderFilter && folderFilter.length > 0 ? folderFilter[0] : null
+  const hasClientOnlyFilters =
+    !!similarAssetIds ||
+    !!colorFilter ||
+    !!(sizeFilter && sizeFilter.length > 0) ||
+    !!(ratingFilter && ratingFilter.length > 0) ||
+    !!(shapeFilter && shapeFilter.length > 0)
+  const similarAssetIdSet = useMemo(
+    () => (similarAssetIds ? new Set(similarAssetIds) : null),
+    [similarAssetIds]
+  )
+  const effectivePageSize = hasClientOnlyFilters ? FULL_FETCH_PAGE_SIZE : INCREMENTAL_PAGE_SIZE
   const normalizedLibraryPath = (currentLibraryPath || 'no-library').replace(/\\/g, '/')
   const canvasScope = currentFolderPath
     ? `folder:${currentFolderPath}`
@@ -721,36 +746,11 @@ export function AssetsPage() {
     }
   }, [layoutMode, isCanvasEnabled, setLayoutMode])
 
-  useEffect(() => {
-    if (!(window as any).__TAURI_INTERNALS__ && !(window as any).__TAURI__) return
-    if (!currentLibraryPath) {
-      setFolders([])
-      return
-    }
-    const loadFolders = async () => {
-      try {
-        const folderRows = await invoke<FolderInfo[]>('get_folders')
-        setFolders(folderRows)
-      } catch (e) {
-        console.error('Failed to load folders for preview:', e)
-      }
-    }
-    loadFolders()
-  }, [currentLibraryPath, refreshVersion])
-
-  useEffect(() => {
-    if (!(window as any).__TAURI_INTERNALS__ && !(window as any).__TAURI__) return
-    if (!currentLibraryPath) {
-      setAssets([])
-      return
-    }
-
+  const queryFilters = useMemo((): Partial<AssetFilters> => {
     const hasFolderPreview = !!(folderFilter && folderFilter.length > 0)
-    const filters: Partial<AssetFilters> & { page: number; page_size: number } = {
+    const filters: Partial<AssetFilters> = {
       sort_field: sortConfig.field,
       sort_order: sortConfig.order,
-      page: 1,
-      page_size: 10000,
       is_trashed: hasFolderPreview ? false : activeView === 'trash' ? true : false,
     }
 
@@ -774,103 +774,189 @@ export function AssetsPage() {
       filters.folder_path = folderFilter[0]
     }
 
-    if (searchQuery) {
-      filters.search_query = searchQuery
+    if (debouncedSearchQuery) {
+      filters.search_query = debouncedSearchQuery
     }
 
-    const loadData = async () => {
+    return filters
+  }, [activeView, activeWorkspaceId, debouncedSearchQuery, folderFilter, sortConfig, tagFilter, typeFilter])
+
+  useEffect(() => {
+    if (!isTauri()) return
+    if (!currentLibraryPath) {
+      setFolders([])
+      return
+    }
+    const loadFolders = async () => {
       try {
-        const result = await invoke('query_assets', { filters }) as any
-        setAssets(result.items as AssetLite[])
+        const folderRows = await invoke<FolderInfo[]>('get_folders')
+        setFolders(folderRows)
       } catch (e) {
-        const message = e instanceof Error ? e.message : String(e)
-        if (!message.includes("No library is currently open")) {
-          console.error('Failed to load filtered assets:', e)
-        }
+        console.error('Failed to load folders for preview:', e)
       }
     }
+    loadFolders()
+  }, [currentLibraryPath, refreshVersion])
 
-    loadData()
-  }, [activeView, tagFilter, activeWorkspaceId, typeFilter, folderFilter, searchQuery, sortConfig, currentLibraryPath, refreshVersion])
-
-  const filteredAssets = assets.filter(asset => {
-    // Similar Search filter (highest priority if active)
-    if (similarAssetIds) {
-      return similarAssetIds.includes(asset.id);
-    }
-
-    // Color filter (not handled by backend)
-    let matchesColor = true
-    if (colorFilter) {
-      if (!asset.dominant_color) {
-        matchesColor = false
-      } else {
-        if (colorFilter.exact) {
-          matchesColor = asset.dominant_color.toLowerCase() === colorFilter.hex.toLowerCase()
-        } else {
-          const distance = colorDistance(colorFilter.hex, asset.dominant_color)
-          matchesColor = distance < 150 // approximate match threshold
-        }
-      }
-    }
-
-    // Size filter (not handled by backend)
-    let matchesSize = true
-    if (sizeFilter && sizeFilter.length > 0) {
-      matchesSize = sizeFilter.some(key => {
-        const opt = SIZE_FILTER_OPTIONS.find(o => o.label === key)
-        if (!opt) return false
-        return asset.size >= opt.min && asset.size < opt.max
+  const loadPage = useCallback(async (page: number, mode: 'replace' | 'append', token: number) => {
+    if (!isTauri()) return
+    if (loadingPageRef.current) return
+    loadingPageRef.current = true
+    setIsLoadingPage(true)
+    const previousCount = mode === 'append' ? useAssetStore.getState().assets.length : 0
+    try {
+      const result = await invoke<QueryAssetsResult>('query_assets', {
+        filters: {
+          ...queryFilters,
+          page,
+          page_size: effectivePageSize,
+          skip_total_count: mode === 'append',
+        },
       })
-    }
 
-    // Rating filter (not handled by backend)
-    let matchesRating = true
-    if (ratingFilter && ratingFilter.length > 0) {
-      matchesRating = ratingFilter.includes(asset.rating || 0)
-    }
+      if (token !== queryTokenRef.current) return
 
-    // Shape filter (not handled by backend)
-    let matchesShape = true
-    if (shapeFilter && shapeFilter.length > 0) {
-      if (!asset.width || !asset.height) {
-        matchesShape = false
+      if (mode === 'replace') {
+        setAssets(result.items)
       } else {
-        const ratio = asset.width / asset.height
-        const shapes: string[] = []
-        if (ratio >= 0.8 && ratio <= 1.25) shapes.push('square')
-        if (ratio > 1.25) shapes.push('wide')
-        if (ratio < 0.8) shapes.push('tall')
-        if (ratio > 2.5) shapes.push('panoramic')
-        matchesShape = shapeFilter.some(s => shapes.includes(s))
+        appendAssets(result.items)
+      }
+
+      const loadedCount = previousCount + result.items.length
+      const previousPagination = useAssetStore.getState().pagination
+      const knownTotalCount = result.total_count > 0 ? result.total_count : previousPagination.totalCount
+      const hasMore = knownTotalCount > 0
+        ? loadedCount < knownTotalCount
+        : result.items.length === effectivePageSize
+      setPagination({
+        page,
+        pageSize: effectivePageSize,
+        totalCount: knownTotalCount > 0 ? knownTotalCount : loadedCount,
+        hasMore,
+      })
+    } catch (e) {
+      if (token !== queryTokenRef.current) return
+      const message = e instanceof Error ? e.message : String(e)
+      if (!message.includes("No library is currently open")) {
+        console.error('Failed to load paged assets:', e)
+      }
+    } finally {
+      if (token === queryTokenRef.current) {
+        setIsLoadingPage(false)
+        loadingPageRef.current = false
       }
     }
+  }, [appendAssets, effectivePageSize, queryFilters, setAssets, setPagination])
 
-    return matchesColor && matchesSize && matchesRating && matchesShape
-  }).sort((a, b) => {
-    const { field, order } = sortConfig
-    let comparison = 0
-
-    switch (field) {
-      case 'name':
-        comparison = a.name.localeCompare(b.name)
-        break
-      case 'size':
-        comparison = a.size - b.size
-        break
-      case 'rating':
-        comparison = (a.rating || 0) - (b.rating || 0)
-        break
-      case 'created_at':
-        comparison = (a.created_at || 0) - (b.created_at || 0)
-        break
-      case 'modified_at':
-        comparison = (a.modified_at || 0) - (b.modified_at || 0)
-        break
+  useEffect(() => {
+    if (!isTauri()) return
+    if (!currentLibraryPath) {
+      setAssets([])
+      setPagination({
+        page: 1,
+        pageSize: effectivePageSize,
+        totalCount: 0,
+        hasMore: false,
+      })
+      return
     }
 
-    return order === 'asc' ? comparison : -comparison
-  })
+    const token = queryTokenRef.current + 1
+    queryTokenRef.current = token
+    loadingPageRef.current = false
+    setPagination({
+      page: 1,
+      pageSize: effectivePageSize,
+      totalCount: 0,
+      hasMore: true,
+    })
+    parentRef.current?.scrollTo({ top: 0 })
+    void loadPage(1, 'replace', token)
+  }, [currentLibraryPath, effectivePageSize, loadPage, queryFilters, refreshVersion, setAssets, setPagination])
+
+  const loadNextPage = useCallback(() => {
+    if (!isTauri()) return
+    if (!pagination.hasMore || isLoadingPage) return
+    const token = queryTokenRef.current
+    void loadPage(pagination.page + 1, 'append', token)
+  }, [isLoadingPage, loadPage, pagination.hasMore, pagination.page])
+
+  useEffect(() => {
+    if (layoutMode === 'canvas') return
+    const el = parentRef.current
+    if (!el) return
+    const onScroll = () => {
+      if (el.scrollHeight - el.scrollTop - el.clientHeight <= LOAD_MORE_THRESHOLD_PX) {
+        loadNextPage()
+      }
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    onScroll()
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [layoutMode, loadNextPage, assets.length])
+
+  const filteredAssets = useMemo(() => {
+    if (!hasClientOnlyFilters) {
+      // Backend already applied sorting/filtering for this path.
+      return assets
+    }
+
+    return assets.filter(asset => {
+      // Similar Search filter (highest priority if active)
+      if (similarAssetIdSet) {
+        return similarAssetIdSet.has(asset.id);
+      }
+
+      // Color filter (not handled by backend)
+      let matchesColor = true
+      if (colorFilter) {
+        if (!asset.dominant_color) {
+          matchesColor = false
+        } else {
+          if (colorFilter.exact) {
+            matchesColor = asset.dominant_color.toLowerCase() === colorFilter.hex.toLowerCase()
+          } else {
+            const distance = colorDistance(colorFilter.hex, asset.dominant_color)
+            matchesColor = distance < 150 // approximate match threshold
+          }
+        }
+      }
+
+      // Size filter (not handled by backend)
+      let matchesSize = true
+      if (sizeFilter && sizeFilter.length > 0) {
+        matchesSize = sizeFilter.some(key => {
+          const opt = SIZE_FILTER_OPTIONS.find(o => o.label === key)
+          if (!opt) return false
+          return asset.size >= opt.min && asset.size < opt.max
+        })
+      }
+
+      // Rating filter (not handled by backend)
+      let matchesRating = true
+      if (ratingFilter && ratingFilter.length > 0) {
+        matchesRating = ratingFilter.includes(asset.rating || 0)
+      }
+
+      // Shape filter (not handled by backend)
+      let matchesShape = true
+      if (shapeFilter && shapeFilter.length > 0) {
+        if (!asset.width || !asset.height) {
+          matchesShape = false
+        } else {
+          const ratio = asset.width / asset.height
+          const shapes: string[] = []
+          if (ratio >= 0.8 && ratio <= 1.25) shapes.push('square')
+          if (ratio > 1.25) shapes.push('wide')
+          if (ratio < 0.8) shapes.push('tall')
+          if (ratio > 2.5) shapes.push('panoramic')
+          matchesShape = shapeFilter.some(s => shapes.includes(s))
+        }
+      }
+
+      return matchesColor && matchesSize && matchesRating && matchesShape
+    })
+  }, [assets, hasClientOnlyFilters, similarAssetIdSet, colorFilter, sizeFilter, ratingFilter, shapeFilter])
 
   // Grid: use CSS flexbox wrap with fixed item width for stable layout
   const gap = 24
@@ -883,7 +969,7 @@ export function AssetsPage() {
   }, [filteredAssets.length, columnCount])
 
   // Measure actual row height for accurate virtualization
-  const measureRowHeight = useCallback((index: number) => {
+  const measureRowHeight = useCallback(() => {
     const cardHeight = thumbnailSize + 72 // image + label area (name + meta + margins)
     return cardHeight + gap // gap between rows
   }, [thumbnailSize, gap])
@@ -895,14 +981,47 @@ export function AssetsPage() {
     overscan: 5,
   })
 
+  const virtualizedGridWidth = useMemo(() => {
+    if (columnCount <= 0) return 0
+    return columnCount * thumbnailSize + Math.max(0, columnCount - 1) * gap
+  }, [columnCount, thumbnailSize, gap])
+
+  const estimateMasonryItemHeight = useCallback((index: number) => {
+    const asset = filteredAssets[index]
+    if (!asset) {
+      return thumbnailSize + 88
+    }
+
+    const width = asset.width || thumbnailSize
+    const height = asset.height || thumbnailSize
+    const safeWidth = Math.max(1, width)
+    const safeHeight = Math.max(1, height)
+    const scaledPreviewHeight = Math.round((thumbnailSize * safeHeight) / safeWidth)
+    return scaledPreviewHeight + 88
+  }, [filteredAssets, thumbnailSize])
+
+  const masonryVirtualizer = useVirtualizer({
+    count: filteredAssets.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: estimateMasonryItemHeight,
+    overscan: Math.max(12, columnCount * 4),
+    gap,
+    lanes: columnCount,
+  })
+
   // Force virtualizer to recalculate when thumbnail size or column count changes
   useEffect(() => {
     rowVirtualizer.measure()
-  }, [thumbnailSize, columnCount, rowVirtualizer])
+    masonryVirtualizer.measure()
+  }, [thumbnailSize, columnCount, rowVirtualizer, masonryVirtualizer])
 
   // Prevent "Rendered fewer hooks than expected" by ensuring early returns happen AFTER all hooks.
   if (activeView === 'tags') {
-    return <TagsView />
+    return (
+      <Suspense fallback={<div className="flex h-full items-center justify-center text-zinc-500">正在加载标签...</div>}>
+        <TagsView />
+      </Suspense>
+    )
   }
 
   return (
@@ -917,7 +1036,7 @@ export function AssetsPage() {
             <ChevronRight className="w-5 h-5" />
           </button>
           <span className="ml-2 font-bold text-zinc-900 dark:text-zinc-100 truncate">
-            {similarAssetIds ? "相似图检索结果" : currentFolderPath ? `文件夹预览: ${currentFolderPath}` : activeWorkspaceName}
+            {similarAssetIds ? "相似图检索结果" : currentFolderPath ? currentFolderPath : activeWorkspaceName}
           </span>
           {similarAssetIds && (
             <button
@@ -1009,7 +1128,7 @@ export function AssetsPage() {
       </div>
 
       {/* Filter Bar */}
-      <div className="flex items-center gap-4 px-6 py-2 border-b border-zinc-100 dark:border-zinc-800 shrink-0 overflow-visible relative z-30">
+      <div className="flex items-center gap-4 px-6 py-2 border-b border-zinc-100 dark:border-zinc-800 shrink-0 overflow-visible relative z-30 select-none">
         {/* Color Filter */}
         <div className="relative shrink-0 flex items-center gap-1">
           <button
@@ -1029,10 +1148,12 @@ export function AssetsPage() {
             <>
               <div className="fixed inset-0 z-[99]" onClick={() => setIsColorPickerOpen(false)} />
               <div className="absolute top-full left-0 mt-2 z-[100]">
-                <ColorWheelPicker
-                  color={colorFilter?.hex || '#000000'}
-                  onChange={(hex) => setColorFilter({ hex, exact: false })}
-                />
+                <Suspense fallback={<div className="w-[280px] h-[280px] rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800" />}>
+                  <ColorWheelPicker
+                    color={colorFilter?.hex || '#000000'}
+                    onChange={(hex) => setColorFilter({ hex, exact: false })}
+                  />
+                </Suspense>
               </div>
             </>
           )}
@@ -1056,7 +1177,7 @@ export function AssetsPage() {
                 <div className="fixed inset-0 z-[9]" onClick={() => setIsTagFilterOpen(false)} />
                 <div className="absolute top-full left-0 mt-1 flex flex-col bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg z-10 py-1 min-w-[120px] max-h-48 overflow-y-auto no-scrollbar">
                   <button onClick={() => { setTagFilter(null); setIsTagFilterOpen(false) }} className="px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800">清除筛选</button>
-                  {allTags.length > 0 ? allTags.map((tag: any) => {
+                  {allTags.length > 0 ? allTags.map((tag: string) => {
                     const isSelected = tagFilter?.includes(tag)
                     return (
                       <button
@@ -1323,14 +1444,16 @@ export function AssetsPage() {
             )}
 
             {layoutMode === 'canvas' && isCanvasEnabled ? (
-              <WorkspaceCanvasView
-                assets={filteredAssets}
-                selectedAssetIds={selectedAssets}
-                onSelectionChange={(ids) => setSelectedAssets(ids)}
-                thumbnailSize={thumbnailSize}
-                onOpenPreview={(asset) => setPreviewAsset(asset, true)}
-                persistenceKey={canvasPersistenceKey}
-              />
+              <Suspense fallback={<div className="flex h-full items-center justify-center text-zinc-500">正在加载画布...</div>}>
+                <WorkspaceCanvasView
+                  assets={filteredAssets}
+                  selectedAssetIds={selectedAssets}
+                  onSelectionChange={(ids) => setSelectedAssets(ids)}
+                  thumbnailSize={thumbnailSize}
+                  onOpenPreview={(asset) => setPreviewAsset(asset, true)}
+                  persistenceKey={canvasPersistenceKey}
+                />
+              </Suspense>
             ) : filteredAssets.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-zinc-500">
                 <p>{currentFolderPath ? '当前文件夹没有可显示资源' : '没有找到资产'}</p>
@@ -1339,42 +1462,58 @@ export function AssetsPage() {
                 </p>
               </div>
             ) : layoutMode === 'masonry' ? (
-              // Non-virtualized Masonry fallback for complex layouts
+              // Virtualized Masonry
               <div
                 style={{
-                  columnWidth: `${thumbnailSize}px`,
-                  columnGap: '24px'
+                  height: `${masonryVirtualizer.getTotalSize()}px`,
+                  width: `${virtualizedGridWidth}px`,
+                  maxWidth: '100%',
+                  margin: '0 auto',
+                  position: 'relative',
                 }}
               >
-                {filteredAssets.map((asset) => {
+                {masonryVirtualizer.getVirtualItems().map((virtualItem) => {
+                  const asset = filteredAssets[virtualItem.index]
+                  if (!asset) return null
                   const isSelected = selectedAssets.includes(asset.id);
                   return (
-                    <AssetCard
+                    <div
                       key={asset.id}
-                      asset={asset}
-                      isSelected={isSelected}
-                      layoutMode={layoutMode}
-                      thumbnailSize={thumbnailSize}
-                      workspaces={workspaces}
-                      onSelect={(e: React.MouseEvent) => handleAssetSelect(asset.id, e)}
-                      onContextMenu={() => handleAssetContextMenu(asset.id)}
-                      onPreview={() => setPreviewAsset(asset, true)}
-                      onShowInFolder={() => handleShowInFolder(asset.path)}
-                      onPreviewFolder={() => handlePreviewFolderFromAsset(asset.path)}
-                      onSearchSimilar={() => handleSearchSimilar(asset.id)}
-                      onDelete={(hard: boolean) => handleDeleteAsset(asset.id, hard)}
-                      onQuickAddTag={() => handleQuickAddTag(asset.id)}
-                      onAssignWorkspace={async (wsId: string) => {
-                        // Workspace assignment now requires detail data
-                        await safeInvoke("update_asset", {
-                          id: asset.id,
-                          workspaceIds: JSON.stringify([wsId]),
-                          workspace_ids: JSON.stringify([wsId]),
-                        });
-                        triggerRefresh()
+                      data-index={virtualItem.index}
+                      ref={masonryVirtualizer.measureElement}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: `${virtualItem.lane * (thumbnailSize + gap)}px`,
+                        width: `${thumbnailSize}px`,
+                        transform: `translateY(${virtualItem.start}px)`,
                       }}
-                      activeView={activeView}
-                    />
+                    >
+                      <AssetCard
+                        asset={asset}
+                        isSelected={isSelected}
+                        layoutMode={layoutMode}
+                        workspaces={workspaces}
+                        onSelect={(e: React.MouseEvent) => handleAssetSelect(asset.id, e)}
+                        onContextMenu={() => handleAssetContextMenu(asset.id)}
+                        onPreview={() => setPreviewAsset(asset, true)}
+                        onShowInFolder={() => handleShowInFolder(asset.path)}
+                        onPreviewFolder={() => handlePreviewFolderFromAsset(asset.path)}
+                        onSearchSimilar={() => handleSearchSimilar(asset.id)}
+                        onDelete={(hard: boolean) => handleDeleteAsset(asset.id, hard)}
+                        onQuickAddTag={() => handleQuickAddTag(asset.id)}
+                        onAssignWorkspace={async (wsId: string) => {
+                          // Workspace assignment now requires detail data
+                          await safeInvoke("update_asset", {
+                            id: asset.id,
+                            workspaceIds: JSON.stringify([wsId]),
+                            workspace_ids: JSON.stringify([wsId]),
+                          });
+                          triggerRefresh()
+                        }}
+                        activeView={activeView}
+                      />
+                    </div>
                   )
                 })}
               </div>
@@ -1416,7 +1555,6 @@ export function AssetsPage() {
                           asset={asset}
                           isSelected={isSelected}
                           layoutMode={layoutMode}
-                          thumbnailSize={thumbnailSize}
                           workspaces={workspaces}
                           onSelect={(e: React.MouseEvent) => handleAssetSelect(asset.id, e)}
                           onContextMenu={() => handleAssetContextMenu(asset.id)}
@@ -1440,6 +1578,11 @@ export function AssetsPage() {
                     })}
                   </div>
                 ))}
+              </div>
+            )}
+            {layoutMode !== 'canvas' && pagination.totalCount > 0 && (
+              <div className="py-3 text-center text-xs text-zinc-500">
+                {isLoadingPage ? "正在加载更多..." : pagination.hasMore ? "滚动以加载更多" : `已加载全部 ${pagination.totalCount} 项`}
               </div>
             )}
           </div>

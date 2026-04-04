@@ -23,6 +23,7 @@ pub fn run() {
             commands::query_assets,
             commands::get_asset_detail,
             commands::ensure_asset_thumbnail,
+            commands::repair_missing_thumbnails,
             commands::ensure_asset_full_preview,
             commands::update_asset,
             commands::delete_assets,

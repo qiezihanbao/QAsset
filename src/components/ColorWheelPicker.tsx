@@ -89,6 +89,19 @@ const COMMON_COLORS = [
 ]
 
 type ColorMode = 'RGB' | 'HSL' | 'HEX'
+type RgbChannel = 'r' | 'g' | 'b'
+type HslChannel = 'h' | 's' | 'l'
+type SliderChannel = RgbChannel | HslChannel
+
+interface SliderConfig {
+  label: string
+  value: number
+  min: number
+  max: number
+  channel: SliderChannel
+  trackColor: string
+  trackBg: string
+}
 
 interface ColorWheelPickerProps {
   color: string // hex
@@ -240,13 +253,17 @@ export function ColorWheelPicker({ color, onChange }: ColorWheelPickerProps) {
     }
   }, [handleWheelInteraction, handleSquareInteraction])
 
-  const handleSliderChange = (channel: string, value: number) => {
+  const handleSliderChange = (channel: SliderChannel, value: number) => {
     let newRgb = { ...rgb }
     if (mode === 'RGB') {
-      (newRgb as any)[channel] = value
+      if (channel === 'r' || channel === 'g' || channel === 'b') {
+        newRgb = { ...newRgb, [channel]: value }
+      }
     } else if (mode === 'HSL') {
       const newHsl = { ...hsl }
-      ;(newHsl as any)[channel] = value
+      if (channel === 'h' || channel === 's' || channel === 'l') {
+        Object.assign(newHsl, { [channel]: value })
+      }
       newRgb = hslToRgb(newHsl.h, newHsl.s, newHsl.l)
     }
     onChange(rgbToHex(newRgb.r, newRgb.g, newRgb.b))
@@ -260,7 +277,7 @@ export function ColorWheelPicker({ color, onChange }: ColorWheelPickerProps) {
   }
 
   // Build slider definitions with real CSS colors for the track
-  const sliders = mode === 'RGB' ? [
+  const sliders: SliderConfig[] = mode === 'RGB' ? [
     { label: 'R', value: rgb.r, min: 0, max: 255, channel: 'r', trackColor: '#ef4444', trackBg: '#3a1111' },
     { label: 'G', value: rgb.g, min: 0, max: 255, channel: 'g', trackColor: '#22c55e', trackBg: '#113a1a' },
     { label: 'B', value: rgb.b, min: 0, max: 255, channel: 'b', trackColor: '#3b82f6', trackBg: '#111a3a' },
@@ -271,7 +288,7 @@ export function ColorWheelPicker({ color, onChange }: ColorWheelPickerProps) {
   ] : []
 
   return (
-    <div className="w-72 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-700 p-4">
+    <div className="w-72 bg-white dark:bg-zinc-900 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-700 p-4 select-none">
       {/* Title */}
       <div className="flex items-center justify-between mb-3">
         <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">颜色筛选</span>
@@ -287,14 +304,14 @@ export function ColorWheelPicker({ color, onChange }: ColorWheelPickerProps) {
           ref={wheelRef}
           width={288}
           height={288}
-          className="w-full h-full cursor-crosshair"
+          className="w-full h-full cursor-crosshair select-none"
           onMouseDown={(e) => { isDraggingWheel.current = true; handleWheelInteraction(e) }}
         />
         <canvas
           ref={squareRef}
           width={160}
           height={160}
-          className="absolute cursor-crosshair rounded-sm"
+          className="absolute cursor-crosshair rounded-sm select-none"
           style={{
             top: '50%', left: '50%',
             width: '50%', height: '50%',

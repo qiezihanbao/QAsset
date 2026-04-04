@@ -97,7 +97,15 @@ pub fn get_library_info(library_root: &Path) -> Result<LibraryConfig, String> {
 }
 
 pub fn get_db_connection(db_path: &Path) -> Result<Connection, String> {
-    Connection::open(db_path).map_err(|e| format!("DB connection failed: {}", e))
+    let conn = Connection::open(db_path).map_err(|e| format!("DB connection failed: {}", e))?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;
+         PRAGMA wal_autocheckpoint=1000;
+         PRAGMA busy_timeout=5000;",
+    )
+    .map_err(|e| format!("DB pragma setup failed: {}", e))?;
+    Ok(conn)
 }
 
 pub fn now_secs() -> u64 {

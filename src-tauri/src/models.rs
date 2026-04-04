@@ -57,6 +57,7 @@ pub struct AssetFilters {
     pub sort_order: String,
     pub page: u32,
     pub page_size: u32,
+    pub skip_total_count: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]

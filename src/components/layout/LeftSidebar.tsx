@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from "react"
 import { Menu, Target, CheckSquare, Tags, Trash2, Box, Folder, Plus, ChevronRight, ChevronDown, Check, X } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
-import { useAssetStore, type ViewType } from "@/store/useAssetStore"
+import { useAssetStore, type ViewType, type Workspace } from "@/store/useAssetStore"
 import * as ContextMenu from '@radix-ui/react-context-menu'
 import { isMobile } from "@/lib/utils"
+import { useShallow } from "zustand/react/shallow"
 
 interface FolderInfo {
   path: string
@@ -17,6 +18,19 @@ interface LibraryStats {
   active_count: number
   trashed_count: number
   total_size: number
+}
+
+interface CountQueryResult {
+  total_count: number
+}
+
+type QuickAssetWindow = Window & {
+  __loadAssets?: () => Promise<void> | void
+}
+
+const loadAssetsFromWindow = async () => {
+  const quickWindow = window as QuickAssetWindow
+  await quickWindow.__loadAssets?.()
 }
 
 type ShortcutKey = 'all' | 'unorganized' | 'tags' | 'trash'
@@ -47,11 +61,15 @@ function ContextCheckboxMenuItem({ checked, onToggle, children, icon }: ContextC
 }
 
 export function LeftSidebar() {
-  const {
+  const [
     assets, workspaces, setWorkspaces, activeWorkspaceId, activeView,
     folderFilter, folderPreviewVisibility, setFolderPreviewVisibility,
-    addWorkspace, toggleLeftSidebar, currentLibrary, currentLibraryPath
-  } = useAssetStore()
+    addWorkspace, toggleLeftSidebar, currentLibrary, currentLibraryPath,
+  ] = useAssetStore(useShallow((s) => ([
+    s.assets, s.workspaces, s.setWorkspaces, s.activeWorkspaceId, s.activeView,
+    s.folderFilter, s.folderPreviewVisibility, s.setFolderPreviewVisibility,
+    s.addWorkspace, s.toggleLeftSidebar, s.currentLibrary, s.currentLibraryPath,
+  ])))
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [isAddingWorkspace, setIsAddingWorkspace] = useState(false)
   const [newWorkspaceName, setNewWorkspaceName] = useState("")
@@ -69,6 +87,7 @@ export function LeftSidebar() {
     tags: true,
     trash: true
   })
+  const [isRootTreeExpanded, setIsRootTreeExpanded] = useState(false)
   const lastNonFolderSelectionRef = useRef<{ view: ViewType; workspaceId: string | null }>({
     view: activeView,
     workspaceId: activeWorkspaceId ?? null,
@@ -144,6 +163,16 @@ export function LeftSidebar() {
     window.dispatchEvent(new Event('quickasset:refresh-assets'))
   }, [normalizeFolderPath])
 
+  const openRootFolder = useCallback(() => {
+    useAssetStore.setState({
+      folderFilter: null,
+      similarAssetIds: null,
+      activeView: 'all',
+      activeWorkspaceId: null,
+    })
+    window.dispatchEvent(new Event('quickasset:refresh-assets'))
+  }, [])
+
   // Load workspaces from backend on mount
   useEffect(() => {
     if (!(window.__TAURI_INTERNALS__ || window.__TAURI__)) return
@@ -151,8 +180,8 @@ export function LeftSidebar() {
       setWorkspaces([])
       return
     }
-    invoke('get_workspaces').then((ws: any) => {
-      setWorkspaces(ws.map((w: any) => ({ id: w.id, name: w.name })))
+    invoke<Workspace[]>('get_workspaces').then((ws) => {
+      setWorkspaces(ws.map((w) => ({ id: w.id, name: w.name })))
     }).catch((e) => console.warn('Failed to load workspaces:', e))
   }, [currentLibraryPath, setWorkspaces])
 
@@ -178,7 +207,7 @@ export function LeftSidebar() {
     try {
       const countPairs = await Promise.all(
         workspaces.map(async (ws) => {
-          const result = await invoke<any>('query_assets', {
+          const result = await invoke<CountQueryResult>('query_assets', {
             filters: {
               workspace_id: ws.id,
               is_trashed: false,
@@ -370,6 +399,20 @@ export function LeftSidebar() {
     }
     sortTree(rootNodes)
 
+    const rootFolderLabel = currentLibrary?.name
+      || (() => {
+        const parts = (currentLibraryPath || '').replace(/\\/g, '/').split('/').filter(Boolean)
+        return parts.length > 0 ? parts[parts.length - 1] : 'root'
+      })()
+    const isRootSelected = !currentFolderNormalized && activeView === 'all'
+    const handleRootFolderClick = () => {
+      if (isRootSelected) {
+        setIsRootTreeExpanded(prev => !prev)
+        return
+      }
+      openRootFolder()
+    }
+
     // Recursive component to render tree
     const FolderNodeComponent = ({ node, level = 0 }: { node: TreeNode; level?: number }) => {
       const [isExpanded, setIsExpanded] = useState(true)
@@ -384,6 +427,7 @@ export function LeftSidebar() {
         if (isSelected) {
           closeFolderPreviewToParent(node.parent_path)
         } else {
+          setIsRootTreeExpanded(true)
           openFolderPreview(node.path)
         }
       }
@@ -411,13 +455,12 @@ export function LeftSidebar() {
         <div className="w-full">
           <ContextMenu.Root>
             <ContextMenu.Trigger>
-              <div className="flex items-center">
+              <div className="flex min-w-0 items-center" style={{ paddingLeft: `${level * 12}px` }}>
                 <button
                   onClick={() => {
                     if (hasChildren) setIsExpanded(!isExpanded)
                   }}
                   className="p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
-                  style={{ marginLeft: `${level * 12}px` }}
                 >
                   {hasChildren ? (
                     isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />
@@ -427,15 +470,23 @@ export function LeftSidebar() {
                 </button>
                 <button
                   onClick={handleFolderClick}
-                  className={`flex-1 flex items-center justify-between px-1 py-1.5 rounded-md text-[13px] font-medium transition-colors ${
+                  className={`flex min-w-0 flex-1 items-center justify-between px-1 py-1.5 rounded-md text-[13px] font-medium transition-colors ${
                     isSelected
                       ? "bg-indigo-100 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300"
                       : "text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/40 dark:hover:bg-zinc-800/50 hover:text-zinc-900 dark:hover:text-zinc-50"
                   }`}
                 >
-                  <div className="flex items-center gap-1.5 overflow-hidden">
+                  <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
                     <Folder className="w-3.5 h-3.5 opacity-70 shrink-0" />
-                    <span className="truncate">{node.display_name}</span>
+                    <span
+                      className="min-w-0 overflow-hidden whitespace-nowrap"
+                      style={{
+                        WebkitMaskImage: 'linear-gradient(to right, black 84%, transparent)',
+                        maskImage: 'linear-gradient(to right, black 84%, transparent)',
+                      }}
+                    >
+                      {node.display_name}
+                    </span>
                   </div>
                   {node.asset_count > 0 && <span className="text-xs opacity-60 shrink-0 px-1">{node.asset_count}</span>}
                 </button>
@@ -477,9 +528,35 @@ export function LeftSidebar() {
 
     return (
       <div className="space-y-0.5">
-        {rootNodes.map(child => (
-          <FolderNodeComponent key={child.path} node={child} />
-        ))}
+        <button
+          onClick={handleRootFolderClick}
+          className={`w-full flex items-center justify-between px-1 py-1.5 rounded-md text-[13px] font-medium transition-colors ${
+            isRootSelected
+              ? "bg-indigo-100 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300"
+              : "text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/40 dark:hover:bg-zinc-800/50 hover:text-zinc-900 dark:hover:text-zinc-50"
+          }`}
+        >
+          <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
+            <Folder className="w-3.5 h-3.5 opacity-70 shrink-0" />
+            <span
+              className="min-w-0 overflow-hidden whitespace-nowrap"
+              style={{
+                WebkitMaskImage: 'linear-gradient(to right, black 84%, transparent)',
+                maskImage: 'linear-gradient(to right, black 84%, transparent)',
+              }}
+            >
+              {rootFolderLabel}
+            </span>
+          </div>
+          {libraryStats.active_count > 0 && <span className="text-xs opacity-60 shrink-0 px-1">{libraryStats.active_count}</span>}
+        </button>
+        {isRootTreeExpanded && (
+          <div className="pl-3">
+            {rootNodes.map(child => (
+              <FolderNodeComponent key={child.path} node={child} />
+            ))}
+          </div>
+        )}
       </div>
     )
   }
@@ -491,7 +568,7 @@ export function LeftSidebar() {
     try {
       await invoke("scan_library")
       // Reload assets via the global helper
-      await (window as any).__loadAssets?.()
+      await loadAssetsFromWindow()
     } catch (err) {
       console.warn("Import failed.", err)
       alert("扫描失败: " + err)
@@ -511,7 +588,7 @@ export function LeftSidebar() {
       if (window.confirm(confirmMsg)) {
         await invoke("delete_assets", { ids: missingIds })
         // Reload assets
-        await (window as any).__loadAssets?.()
+        await loadAssetsFromWindow()
         alert("清理完成！")
       }
     } catch (err) {
@@ -523,7 +600,7 @@ export function LeftSidebar() {
   const handleAddWorkspace = async (name: string) => {
     if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
       try {
-        const result = await invoke('create_workspace', { name }) as any
+        const result = await invoke<Workspace>('create_workspace', { name })
         setWorkspaces([...workspaces, { id: result.id, name: result.name }])
         setWorkspaceCounts(prev => ({ ...prev, [result.id]: 0 }))
       } catch (e) {
@@ -630,7 +707,7 @@ export function LeftSidebar() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-3">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden px-3">
         {/* Main Navigation */}
         <nav className="space-y-0.5 mb-6">
           {visibleShortcuts.all && renderNavContextMenu(

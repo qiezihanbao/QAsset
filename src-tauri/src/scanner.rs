@@ -1361,10 +1361,8 @@ pub fn scan_library(
 
     report.deleted = deleted_ids.len() as u32;
 
-    // Delete removed assets from DB
+    // Delete removed thumbnails upfront. DB delete is batched in one transaction below.
     for id in &deleted_ids {
-        let _ = conn.execute("DELETE FROM assets WHERE id = ?1", rusqlite::params![id]);
-        // Also remove orphaned thumbnail
         if let Some(rel) = db_assets.get(id) {
             let thumb_path = thumbnails::thumbnail_abs_path(library_root, &rel.relative_path);
             let _ = fs::remove_file(&thumb_path);
@@ -1433,26 +1431,54 @@ pub fn scan_library(
         .collect();
 
     let now = library::now_secs();
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Transaction begin failed: {}", e))?;
 
-    for (i, (_rel, file, img_result)) in results.iter().enumerate() {
-        let abs_path_str = file.abs_path.to_string_lossy().to_string();
-        let id = abs_path_str.clone();
-
-        if i % 100 == 0 {
-            let _ = app_handle.emit(
-                "scan-progress",
-                ScanProgress {
-                    phase: "writing".to_string(),
-                    scanned: i as u32,
-                    total: results.len() as u32,
-                },
-            );
+    for id in &deleted_ids {
+        if let Err(e) = tx.execute("DELETE FROM assets WHERE id = ?1", rusqlite::params![id]) {
+            report.errors.push(ScanError {
+                path: id.clone(),
+                message: format!("DB delete failed: {}", e),
+            });
         }
+    }
 
-        let is_new = is_new_set.contains(&file.relative_path);
+    {
+        let mut insert_stmt = tx
+            .prepare(
+                "INSERT INTO assets (id, name, path, relative_path, asset_type, size,
+                    dominant_color, tags, description, rating, workspace_ids,
+                    created_at, modified_at, p_hash, is_trashed, width, height,
+                    source_url, duration, thumbnail_mtime)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]', '', NULL, '[]',
+                    ?8, ?9, ?10, 0, ?11, ?12, NULL, NULL, ?13)",
+            )
+            .map_err(|e| format!("Prepare insert failed: {}", e))?;
+        let mut update_stmt = tx
+            .prepare(
+                "UPDATE assets SET name = ?1, path = ?2, size = ?3, modified_at = ?4,
+                    asset_type = ?5, dominant_color = ?6, width = ?7, height = ?8,
+                    p_hash = ?9, thumbnail_mtime = ?10
+                 WHERE id = ?11",
+            )
+            .map_err(|e| format!("Prepare update failed: {}", e))?;
 
-        if is_new {
-            // INSERT new asset
+        for (i, (_rel, file, img_result)) in results.iter().enumerate() {
+            let abs_path_str = file.abs_path.to_string_lossy().to_string();
+            let id = abs_path_str.clone();
+
+            if i % 100 == 0 {
+                let _ = app_handle.emit(
+                    "scan-progress",
+                    ScanProgress {
+                        phase: "writing".to_string(),
+                        scanned: i as u32,
+                        total: results.len() as u32,
+                    },
+                );
+            }
+
             let (dominant_color, width, height, p_hash, thumbnail_mtime) = match img_result {
                 Some(r) => (
                     r.dominant_color.clone(),
@@ -1464,14 +1490,9 @@ pub fn scan_library(
                 None => (None, None, None, None, None),
             };
 
-            let result = conn.execute(
-                "INSERT INTO assets (id, name, path, relative_path, asset_type, size,
-                    dominant_color, tags, description, rating, workspace_ids,
-                    created_at, modified_at, p_hash, is_trashed, width, height,
-                    source_url, duration, thumbnail_mtime)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]', '', NULL, '[]',
-                    ?8, ?9, ?10, 0, ?11, ?12, NULL, NULL, ?13)",
-                rusqlite::params![
+            let is_new = is_new_set.contains(&file.relative_path);
+            if is_new {
+                let result = insert_stmt.execute(rusqlite::params![
                     id,
                     file.name,
                     abs_path_str,
@@ -1485,35 +1506,17 @@ pub fn scan_library(
                     width,
                     height,
                     thumbnail_mtime,
-                ],
-            );
+                ]);
 
-            match result {
-                Ok(_) => report.added += 1,
-                Err(e) => report.errors.push(ScanError {
-                    path: abs_path_str,
-                    message: format!("DB insert failed: {}", e),
-                }),
-            }
-        } else {
-            // UPDATE changed asset
-            let (dominant_color, width, height, p_hash, thumbnail_mtime) = match img_result {
-                Some(r) => (
-                    r.dominant_color.clone(),
-                    Some(r.width),
-                    Some(r.height),
-                    r.p_hash.clone(),
-                    r.thumbnail_mtime,
-                ),
-                None => (None, None, None, None, None),
-            };
-
-            let result = conn.execute(
-                "UPDATE assets SET name = ?1, path = ?2, size = ?3, modified_at = ?4,
-                    asset_type = ?5, dominant_color = ?6, width = ?7, height = ?8,
-                    p_hash = ?9, thumbnail_mtime = ?10
-                 WHERE id = ?11",
-                rusqlite::params![
+                match result {
+                    Ok(_) => report.added += 1,
+                    Err(e) => report.errors.push(ScanError {
+                        path: file.abs_path.to_string_lossy().to_string(),
+                        message: format!("DB insert failed: {}", e),
+                    }),
+                }
+            } else {
+                let result = update_stmt.execute(rusqlite::params![
                     file.name,
                     abs_path_str,
                     file.size as i64,
@@ -1525,21 +1528,25 @@ pub fn scan_library(
                     p_hash,
                     thumbnail_mtime,
                     id,
-                ],
-            );
+                ]);
 
-            match result {
-                Ok(_) => report.updated += 1,
-                Err(e) => report.errors.push(ScanError {
-                    path: abs_path_str,
-                    message: format!("DB update failed: {}", e),
-                }),
+                match result {
+                    Ok(_) => report.updated += 1,
+                    Err(e) => report.errors.push(ScanError {
+                        path: file.abs_path.to_string_lossy().to_string(),
+                        message: format!("DB update failed: {}", e),
+                    }),
+                }
             }
         }
     }
 
+    tx.commit()
+        .map_err(|e| format!("Transaction commit failed: {}", e))?;
+
     // Rebuild folder cache
     rebuild_folders(&conn, library_root)?;
+    maybe_maintain_wal_and_stats(&conn, results.len() + deleted_ids.len());
 
     let _ = app_handle.emit(
         "scan-progress",
@@ -1551,6 +1558,32 @@ pub fn scan_library(
     );
 
     Ok(report)
+}
+
+fn maybe_maintain_wal_and_stats(conn: &Connection, touched_rows: usize) {
+    // Avoid maintenance work for tiny scans.
+    if touched_rows < 2000 {
+        return;
+    }
+
+    // Best-effort WAL checkpoint. If TRUNCATE is blocked by readers, fallback to PASSIVE.
+    let truncate_result: Result<(i64, i64, i64), _> = conn.query_row(
+        "PRAGMA wal_checkpoint(TRUNCATE)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    );
+    if truncate_result.is_err() {
+        let _ = conn.query_row::<(i64, i64, i64), _, _>(
+            "PRAGMA wal_checkpoint(PASSIVE)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        );
+    }
+
+    // ANALYZE only after larger batches to refresh planner stats.
+    if touched_rows >= 8000 {
+        let _ = conn.execute_batch("ANALYZE;");
+    }
 }
 
 /// Phase 1: Walk the directory tree and discover all indexable files.
