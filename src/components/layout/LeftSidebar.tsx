@@ -1,13 +1,15 @@
 import { useState, useRef, useEffect } from "react"
 import { Menu, Target, CheckSquare, Tags, Trash2, Box, Folder, Plus, ChevronRight, ChevronDown, Check, X } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
-import { open } from "@tauri-apps/plugin-dialog"
-import { useAssetStore, type Asset } from "@/store/useAssetStore"
+import { useAssetStore, getSafeArray, type AssetLite } from "@/store/useAssetStore"
 import * as ContextMenu from '@radix-ui/react-context-menu'
 import { isMobile } from "@/lib/utils"
 
 export function LeftSidebar() {
-  const { assets, setAssets, workspaces, activeWorkspaceId, activeView, setActiveView, addWorkspace, toggleLeftSidebar } = useAssetStore()
+  const {
+    assets, setAssets, workspaces, setWorkspaces, activeWorkspaceId, activeView,
+    setActiveView, addWorkspace, toggleLeftSidebar, currentLibrary
+  } = useAssetStore()
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [isAddingWorkspace, setIsAddingWorkspace] = useState(false)
   const [newWorkspaceName, setNewWorkspaceName] = useState("")
@@ -18,6 +20,15 @@ export function LeftSidebar() {
     tags: true,
     trash: true
   })
+
+  // Load workspaces from backend on mount
+  useEffect(() => {
+    if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
+      invoke('get_workspaces').then((ws: any) => {
+        setWorkspaces(ws.map((w: any) => ({ id: w.id, name: w.name })))
+      }).catch((e) => console.warn('Failed to load workspaces:', e))
+    }
+  }, [currentLibrary])
 
   const handleToggleShortcut = (key: keyof typeof visibleShortcuts) => {
     setVisibleShortcuts(prev => ({ ...prev, [key]: !prev[key] }))
@@ -34,10 +45,10 @@ export function LeftSidebar() {
           {children}
         </ContextMenu.Trigger>
         <ContextMenu.Portal>
-          <ContextMenu.Content 
+          <ContextMenu.Content
             className="min-w-[180px] bg-white dark:bg-zinc-900 rounded-md overflow-hidden p-1 shadow-[0px_10px_38px_-10px_rgba(22,_23,_24,_0.35),_0px_10px_20px_-15px_rgba(22,_23,_24,_0.2)] border border-zinc-200 dark:border-zinc-800 animate-in fade-in-80 z-50"
           >
-            <ContextMenu.Item 
+            <ContextMenu.Item
               onClick={() => handleToggleShortcut(key)}
               className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
             >
@@ -50,12 +61,12 @@ export function LeftSidebar() {
                 <ChevronRight className="w-3.5 h-3.5" />
               </ContextMenu.SubTrigger>
               <ContextMenu.Portal>
-                <ContextMenu.SubContent 
+                <ContextMenu.SubContent
                   className="min-w-[160px] bg-white dark:bg-zinc-900 rounded-md overflow-hidden p-1 shadow-lg border border-zinc-200 dark:border-zinc-800 animate-in fade-in-80 z-50"
                   sideOffset={2}
                   alignOffset={-5}
                 >
-                  <ContextMenu.CheckboxItem 
+                  <ContextMenu.CheckboxItem
                     checked={visibleShortcuts.all}
                     onCheckedChange={() => handleToggleShortcut('all')}
                     className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 pl-8 pr-2 relative select-none outline-none hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
@@ -65,7 +76,7 @@ export function LeftSidebar() {
                     </ContextMenu.ItemIndicator>
                     全部文件
                   </ContextMenu.CheckboxItem>
-                  <ContextMenu.CheckboxItem 
+                  <ContextMenu.CheckboxItem
                     checked={visibleShortcuts.unorganized}
                     onCheckedChange={() => handleToggleShortcut('unorganized')}
                     className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 pl-8 pr-2 relative select-none outline-none hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
@@ -75,7 +86,7 @@ export function LeftSidebar() {
                     </ContextMenu.ItemIndicator>
                     待整理文件
                   </ContextMenu.CheckboxItem>
-                  <ContextMenu.CheckboxItem 
+                  <ContextMenu.CheckboxItem
                     checked={visibleShortcuts.tags}
                     onCheckedChange={() => handleToggleShortcut('tags')}
                     className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 pl-8 pr-2 relative select-none outline-none hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
@@ -85,7 +96,7 @@ export function LeftSidebar() {
                     </ContextMenu.ItemIndicator>
                     全部标签
                   </ContextMenu.CheckboxItem>
-                  <ContextMenu.CheckboxItem 
+                  <ContextMenu.CheckboxItem
                     checked={visibleShortcuts.trash}
                     onCheckedChange={() => handleToggleShortcut('trash')}
                     className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 pl-8 pr-2 relative select-none outline-none hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
@@ -98,7 +109,7 @@ export function LeftSidebar() {
                 </ContextMenu.SubContent>
               </ContextMenu.Portal>
             </ContextMenu.Sub>
-            <ContextMenu.Item 
+            <ContextMenu.Item
               onClick={handleResetShortcuts}
               className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
             >
@@ -121,17 +132,6 @@ export function LeftSidebar() {
     document.addEventListener("mousedown", handleClickOutside)
     return () => document.removeEventListener("mousedown", handleClickOutside)
   }, [])
-
-  const getSafeArray = (jsonStr: string | string[] | null | undefined): string[] => {
-    if (!jsonStr) return []
-    if (Array.isArray(jsonStr)) return jsonStr
-    try {
-      const parsed = JSON.parse(jsonStr)
-      return Array.isArray(parsed) ? parsed : []
-    } catch {
-      return []
-    }
-  }
 
   // Generate Folder Tree from assets paths
   const renderFolderTree = () => {
@@ -166,7 +166,7 @@ export function LeftSidebar() {
       const parts = a.path.split(/[\\/]/)
       parts.pop()
       const folderPath = parts.join('/')
-      
+
       const folderParts = folderPath.split('/')
       let current = root
       folderParts.forEach(part => {
@@ -183,7 +183,7 @@ export function LeftSidebar() {
       const [isExpanded, setIsExpanded] = useState(true)
       const { folderFilter, setFolderFilter } = useAssetStore()
       const hasChildren = Object.keys(node.children).length > 0
-      
+
       const isSelected = folderFilter?.includes(node.path)
 
       const handleFolderClick = (e: React.MouseEvent) => {
@@ -227,7 +227,7 @@ export function LeftSidebar() {
               {node.count > 0 && <span className="text-xs opacity-60 shrink-0 px-1">{node.count}</span>}
             </button>
           </div>
-          
+
           {isExpanded && hasChildren && (
             <div className="flex flex-col w-full">
               {Object.values(node.children).map(child => (
@@ -252,44 +252,15 @@ export function LeftSidebar() {
 
   const handleImport = async () => {
     setIsMenuOpen(false)
-    try {
-      const selectedPath = await open({
-        directory: true,
-        multiple: false,
-        title: "选择包含图片、视频或模型文件的文件夹",
-      })
+    if (!(window.__TAURI_INTERNALS__ || window.__TAURI__)) return
 
-      if (selectedPath && typeof selectedPath === 'string') {
-        try {
-          // Run the scan, which inserts into the DB
-          await invoke("scan_directory", { dirPath: selectedPath })
-          // Start watching the directory for hot-reloading
-          await invoke("start_watcher", { dirPath: selectedPath })
-          // Fetch all assets from DB to update the state
-          const allAssets = await invoke<Asset[]>("get_all_assets")
-          setAssets(allAssets)
-        } catch (err) {
-          console.warn("Import failed.", err)
-        }
-      }
+    try {
+      await invoke("scan_library")
+      // Reload assets via the global helper
+      await (window as any).__loadAssets?.()
     } catch (err) {
-      console.warn("Tauri environment not detected or import failed. Using mock data.", err)
-      const mockData = [
-        { id: "1", name: "sebastien-flores-5.jpeg", path: "E:/PixcallLibrary/Pixcall/需求参考/sebastien-flores-5.jpeg", asset_type: "image", size: 377731, dominant_color: "#ffffff", thumbnail_base64: "/mock/sebastien-flores-5.jpeg", workspace_ids: '["2"]' },
-        { id: "2", name: "图像-(1).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(1).jpg", asset_type: "image", size: 172804, dominant_color: "#888888", thumbnail_base64: "/mock/图像-(1).jpg", workspace_ids: '["2"]' },
-        { id: "3", name: "图像-(1).png", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(1).png", asset_type: "image", size: 220966, dominant_color: "#cccccc", thumbnail_base64: "/mock/图像-(1).png", workspace_ids: '["2"]' },
-        { id: "4", name: "图像-(2).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(2).jpg", asset_type: "image", size: 102324, dominant_color: "#ff0000", thumbnail_base64: "/mock/图像-(2).jpg", workspace_ids: '["2"]' },
-        { id: "5", name: "图像-(2).png", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(2).png", asset_type: "image", size: 248480, dominant_color: "#00ff00", thumbnail_base64: "/mock/图像-(2).png", workspace_ids: '["2"]' },
-        { id: "6", name: "图像-(3).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(3).jpg", asset_type: "image", size: 117623, dominant_color: "#0000ff", thumbnail_base64: "/mock/图像-(3).jpg", workspace_ids: '["2"]' },
-        { id: "7", name: "图像-(4).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(4).jpg", asset_type: "image", size: 57073, dominant_color: "#ffff00", thumbnail_base64: "/mock/图像-(4).jpg", workspace_ids: '["2"]' },
-        { id: "8", name: "图像-(5).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(5).jpg", asset_type: "image", size: 42371, dominant_color: "#00ffff", thumbnail_base64: "/mock/图像-(5).jpg", workspace_ids: '["2"]' },
-        { id: "9", name: "图像-(6).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(6).jpg", asset_type: "image", size: 72415, dominant_color: "#ff00ff", thumbnail_base64: "/mock/图像-(6).jpg", workspace_ids: '["2"]' },
-        { id: "10", name: "图像-(7).jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像-(7).jpg", asset_type: "image", size: 37876, dominant_color: "#ffffff", thumbnail_base64: "/mock/图像-(7).jpg", workspace_ids: '["2"]' },
-        { id: "11", name: "图像.jpg", path: "E:/PixcallLibrary/Pixcall/需求参考/图像.jpg", asset_type: "image", size: 474188, dominant_color: "#ffffff", thumbnail_base64: "/mock/图像.jpg", workspace_ids: '["2"]' },
-        { id: "12", name: "图像.png", path: "E:/PixcallLibrary/Pixcall/需求参考/图像.png", asset_type: "image", size: 203956, dominant_color: "#ffffff", thumbnail_base64: "/mock/图像.png", workspace_ids: '["2"]' },
-      ]
-      setAssets(mockData)
-      alert("已加载 E:\\PixcallLibrary\\Pixcall\\需求参考 的真实本地测试图片！")
+      console.warn("Import failed.", err)
+      alert("扫描失败: " + err)
     }
   }
 
@@ -304,12 +275,9 @@ export function LeftSidebar() {
 
       const confirmMsg = `发现 ${missingIds.length} 个失效文件记录，是否立即清理数据库？`
       if (window.confirm(confirmMsg)) {
-        for (const id of missingIds) {
-          await invoke("delete_asset", { id })
-        }
-        // Fetch all assets from DB to update the state
-        const allAssets = await invoke<Asset[]>("get_all_assets")
-        setAssets(allAssets)
+        await invoke("delete_assets", { ids: missingIds })
+        // Reload assets
+        await (window as any).__loadAssets?.()
         alert("清理完成！")
       }
     } catch (err) {
@@ -317,6 +285,42 @@ export function LeftSidebar() {
       alert("清理失败: " + err)
     }
   }
+
+  const handleAddWorkspace = async (name: string) => {
+    if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
+      try {
+        const result = await invoke('create_workspace', { name }) as any
+        setWorkspaces([...workspaces, { id: result.id, name: result.name }])
+      } catch (e) {
+        console.error('Failed to create workspace:', e)
+      }
+    } else {
+      addWorkspace(name)
+    }
+  }
+
+  const handleDeleteWorkspace = async (wsId: string) => {
+    if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
+      try {
+        await invoke('delete_workspace', { id: wsId })
+        setWorkspaces(workspaces.filter(w => w.id !== wsId))
+        if (activeWorkspaceId === wsId) {
+          setActiveView('all')
+        }
+      } catch (e) {
+        console.error('Failed to delete workspace:', e)
+      }
+    } else {
+      const newWorkspaces = workspaces.filter(w => w.id !== wsId)
+      useAssetStore.setState({ workspaces: newWorkspaces })
+      if (activeWorkspaceId === wsId) {
+        setActiveView('all')
+      }
+    }
+  }
+
+  // Library name display
+  const libraryName = currentLibrary?.name || "QuickAsset"
 
   return (
     <aside className={isMobile
@@ -326,23 +330,23 @@ export function LeftSidebar() {
       {/* Top Header */}
       <div className="flex items-center gap-4 px-4 py-4 relative">
         <div ref={menuRef}>
-          <button 
+          <button
             onClick={() => setIsMenuOpen(!isMenuOpen)}
             className="p-1.5 hover:bg-zinc-200 dark:hover:bg-zinc-800 rounded-md transition-colors"
           >
             <Menu className="w-5 h-5 text-zinc-600 dark:text-zinc-400" />
           </button>
-          
+
           {isMenuOpen && (
             <div className="absolute top-12 left-4 w-48 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-md shadow-lg z-50 py-1">
-              <button 
+              <button
                 onClick={handleImport}
                 className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center gap-2"
               >
                 <Plus className="w-4 h-4" />
-                导入文件夹
+                扫描素材库
               </button>
-              <button 
+              <button
                 onClick={handleCleanupMissing}
                 className="w-full text-left px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 flex items-center gap-2"
               >
@@ -369,7 +373,7 @@ export function LeftSidebar() {
 
       {/* Account Info */}
       <div className="px-5 mb-4">
-        <h2 className="font-bold text-zinc-900 dark:text-zinc-100 text-lg mb-1">qiezihanbao</h2>
+        <h2 className="font-bold text-zinc-900 dark:text-zinc-100 text-lg mb-1">{libraryName}</h2>
         <div className="flex flex-col text-xs text-zinc-500 gap-1 mt-2">
           <div className="flex items-center justify-between">
             <span>本地资产总计</span>
@@ -378,8 +382,8 @@ export function LeftSidebar() {
           <div className="flex items-center justify-between">
             <span>占用空间</span>
             <span className="font-medium">
-              {assets.length > 0 
-                ? (assets.reduce((sum, asset) => sum + asset.size, 0) / (1024 * 1024)).toFixed(2) + " MB" 
+              {assets.length > 0
+                ? (assets.reduce((sum, asset) => sum + asset.size, 0) / (1024 * 1024)).toFixed(2) + " MB"
                 : "0 MB"}
             </span>
           </div>
@@ -394,22 +398,22 @@ export function LeftSidebar() {
             'all'
           )}
           {visibleShortcuts.unorganized && renderNavContextMenu(
-            <NavItem id="nav-unorganized" icon={<CheckSquare />} label="待整理文件" count={assets.filter(a => !a.is_trashed && getSafeArray(a.workspace_ids).length === 0 && getSafeArray(a.tags).length === 0).length} active={activeView === 'unorganized'} onClick={() => setActiveView('unorganized')} />,
+            <NavItem id="nav-unorganized" icon={<CheckSquare />} label="待整理文件" count={0} active={activeView === 'unorganized'} onClick={() => setActiveView('unorganized')} />,
             'unorganized'
           )}
           {visibleShortcuts.tags && renderNavContextMenu(
-            <NavItem id="nav-tags" icon={<Tags />} label="全部标签" count={Array.from(new Set(assets.flatMap(a => getSafeArray(a.tags)))).length} active={activeView === 'tags'} onClick={() => setActiveView('tags')} />,
+            <NavItem id="nav-tags" icon={<Tags />} label="全部标签" active={activeView === 'tags'} onClick={() => setActiveView('tags')} />,
             'tags'
           )}
           {visibleShortcuts.trash && renderNavContextMenu(
             <NavItem id="nav-trash" icon={<Trash2 />} label="废纸篓" count={assets.filter(a => a.is_trashed).length} active={activeView === 'trash'} onClick={() => setActiveView('trash')} />,
             'trash'
           )}
-          
+
           {/* Workspaces Header */}
           <div className="pt-4 pb-1 px-2 flex items-center justify-between group">
             <span className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">工作区</span>
-            <button 
+            <button
               onClick={() => setIsAddingWorkspace(true)}
               className="opacity-0 group-hover:opacity-100 p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-all rounded"
             >
@@ -430,7 +434,7 @@ export function LeftSidebar() {
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && newWorkspaceName.trim()) {
-                    addWorkspace(newWorkspaceName.trim())
+                    handleAddWorkspace(newWorkspaceName.trim())
                     setIsAddingWorkspace(false)
                     setNewWorkspaceName("")
                   } else if (e.key === 'Escape') {
@@ -446,47 +450,27 @@ export function LeftSidebar() {
 
           {/* Workspaces List */}
           {(showAllWorkspaces ? workspaces : workspaces.slice(0, 5)).map(ws => {
-            // Calculate count for this workspace safely
-            const count = assets.filter(a => {
-              if (!a.workspace_ids) return false;
-              try {
-                const currentWs = typeof a.workspace_ids === 'string' ? JSON.parse(a.workspace_ids) : []
-                return Array.isArray(currentWs) && currentWs.includes(ws.id);
-              } catch {
-                // If it's already an array or parsing fails
-                if (Array.isArray(a.workspace_ids)) {
-                  return (a.workspace_ids as string[]).includes(ws.id)
-                }
-                return false;
-              }
-            }).length;
-            
             return (
               <ContextMenu.Root key={ws.id}>
                 <ContextMenu.Trigger>
-                  <NavItem 
-                    icon={<Box />} 
-                    label={ws.name} 
-                    count={count}
+                  <NavItem
+                    icon={<Box />}
+                    label={ws.name}
+                    count={0}
                     active={activeView === 'workspace' && activeWorkspaceId === ws.id}
                     onClick={() => setActiveView('workspace', ws.id)}
                   />
                 </ContextMenu.Trigger>
                 <ContextMenu.Portal>
-                  <ContextMenu.Content 
+                  <ContextMenu.Content
                     className="min-w-[160px] bg-white dark:bg-zinc-900 rounded-md overflow-hidden p-1 shadow-[0px_10px_38px_-10px_rgba(22,_23,_24,_0.35),_0px_10px_20px_-15px_rgba(22,_23,_24,_0.2)] border border-zinc-200 dark:border-zinc-800 animate-in fade-in-80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95 z-50"
                   >
-                    <ContextMenu.Item 
+                    <ContextMenu.Item
                       onClick={(e) => {
                         e.stopPropagation()
-                        // Handle delete workspace
                         const confirmDelete = window.confirm('确定要删除此工作区吗？这不会删除其中的文件。')
                         if (confirmDelete) {
-                          const newWorkspaces = workspaces.filter(w => w.id !== ws.id)
-                          useAssetStore.setState({ workspaces: newWorkspaces })
-                          if (activeWorkspaceId === ws.id) {
-                            setActiveView('all')
-                          }
+                          handleDeleteWorkspace(ws.id)
                         }
                       }}
                       className="group text-[13px] leading-none text-red-600 dark:text-red-400 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-red-500 data-[highlighted]:text-white cursor-pointer"
@@ -498,9 +482,9 @@ export function LeftSidebar() {
               </ContextMenu.Root>
             )
           })}
-          
+
           {workspaces.length > 5 && (
-            <button 
+            <button
               onClick={() => setShowAllWorkspaces(!showAllWorkspaces)}
               className="w-full text-left px-2 py-1.5 text-[12px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"
             >
@@ -527,11 +511,11 @@ export function LeftSidebar() {
         <button className="p-1.5 hover:bg-zinc-200 dark:hover:bg-zinc-800 rounded-md transition-colors">
           <Menu className="w-4 h-4 opacity-0" /> {/* Spacer for symmetry if needed, or actual search icon */}
         </button>
-        <button 
+        <button
           id="global-import-btn"
           onClick={handleImport}
           className="p-1.5 hover:bg-zinc-200 dark:hover:bg-zinc-800 rounded-md transition-colors"
-          title="导入文件夹"
+          title="扫描素材库"
         >
           <Plus className="w-5 h-5" />
         </button>
@@ -559,5 +543,3 @@ function NavItem({ icon, label, count, active, onClick, id }: { icon: React.Reac
     </button>
   )
 }
-
-

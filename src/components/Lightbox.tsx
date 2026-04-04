@@ -99,7 +99,6 @@ export function Lightbox() {
         return (
           <ImageViewer
             filePath={previewAsset.path}
-            thumbnailBase64={previewAsset.thumbnail_base64}
             zoom={zoom}
             onZoomChange={setZoom}
           />

@@ -1,41 +1,86 @@
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import { MainLayout } from "@/components/layout/MainLayout"
 import { RightSidebar } from "@/components/layout/RightSidebar"
 import { AssetsPage } from "@/pages/AssetsPage"
-import { useAssetStore } from "@/store/useAssetStore"
+import { useAssetStore, type AssetLite, type LibraryConfig } from "@/store/useAssetStore"
 import { Lightbox } from "@/components/Lightbox"
+import { WelcomePage } from "@/pages/WelcomePage"
+
+const LARGE_PAGE_SIZE = 10000
 
 function App() {
-  const { setAssets, isRightSidebarVisible, toggleLeftSidebar, toggleRightSidebar } = useAssetStore()
+  const {
+    currentLibrary, isLoadingLibrary, setCurrentLibrary, setRecentLibraries,
+    setIsLoadingLibrary, setAssets, setPagination, resetForNewLibrary,
+    isRightSidebarVisible, toggleLeftSidebar, toggleRightSidebar
+  } = useAssetStore()
+
+  const [isInitialized, setIsInitialized] = useState(false)
 
   useEffect(() => {
-    // Try to load existing assets from local database if we are in Tauri environment
-    try {
-      const loadAssets = async () => {
-        try {
-          const assets = await invoke("get_all_assets") as any[]
-          if (Array.isArray(assets) && assets.length > 0) {
-            // Check health
-            const missingIds = await invoke("check_health") as string[]
-            
-            const markedAssets = assets.map(a => ({
-              ...a,
-              is_missing: missingIds.includes(a.id)
-            }))
-            
-            setAssets(markedAssets)
-          }
-        } catch (err) {
-          console.warn("Could not load assets from DB:", err)
-        }
-      }
-      
-      loadAssets()
-    } catch (e) {
-      console.warn("Tauri invoke not available. Running in Web preview mode.")
+    initApp()
+  }, [])
+
+  async function initApp() {
+    if (!window.__TAURI_INTERNALS__ && !window.__TAURI__) {
+      setIsInitialized(true)
+      return
     }
+
+    try {
+      const recents = await invoke('get_recent_libraries') as any[]
+      setRecentLibraries(recents)
+
+      if (recents.length > 0) {
+        const lastLib = recents[0]
+        await openLibrary(lastLib.path)
+      }
+    } catch (e) {
+      console.error('Failed to init:', e)
+    }
+    setIsInitialized(true)
+  }
+
+  async function openLibrary(path: string) {
+    setIsLoadingLibrary(true)
+    resetForNewLibrary()
+    try {
+      const config = await invoke<LibraryConfig>('open_library_cmd', { path })
+      setCurrentLibrary(config, path)
+      await loadAssets()
+    } catch (e) {
+      console.error('Failed to open library:', e)
+    }
+    setIsLoadingLibrary(false)
+  }
+
+  async function loadAssets() {
+    try {
+      const result = await invoke('query_assets', {
+        filters: {
+          sort_field: 'created_at',
+          sort_order: 'desc',
+          page: 1,
+          page_size: LARGE_PAGE_SIZE,
+        }
+      }) as any
+      setAssets(result.items as AssetLite[])
+      setPagination({
+        totalCount: result.total_count,
+        page: 1,
+        hasMore: (result.items as any[]).length < result.total_count,
+      })
+    } catch (e) {
+      console.error('Failed to load assets:', e)
+    }
+  }
+
+  // Expose openLibrary and loadAssets for child components
+  useEffect(() => {
+    ;(window as any).__openLibrary = openLibrary
+    ;(window as any).__loadAssets = loadAssets
   }, [])
 
   useEffect(() => {
@@ -44,7 +89,7 @@ function App() {
       if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
         return;
       }
-      
+
       if (e.key === 'Tab') {
         e.preventDefault();
         if (e.shiftKey) {
@@ -62,13 +107,13 @@ function App() {
         }
       }
     };
-    
+
     window.addEventListener('keydown', handleKeyDown);
-    
+
     // File Drop Handler
     let unlistenDrop: (() => void) | undefined;
     let unlistenFs: (() => void) | undefined;
-    
+
     if (window.__TAURI_INTERNALS__ || window.__TAURI__) {
       try {
         listen('tauri://file-drop', async (event: any) => {
@@ -76,10 +121,8 @@ function App() {
           if (filePaths && filePaths.length > 0) {
             console.log('Files dropped:', filePaths);
             try {
-              await invoke("scan_directory", { dirPath: filePaths[0] });
-              await invoke("start_watcher", { dirPath: filePaths[0] });
-              const allAssets = await invoke("get_all_assets");
-              setAssets(allAssets as any[]);
+              await invoke("scan_library");
+              await (window as any).__loadAssets?.();
               alert("拖拽导入完成！");
             } catch (err) {
               console.error("Drop import failed:", err);
@@ -90,25 +133,18 @@ function App() {
         // File System Hot Reload Listener
         listen('fs-event', async (event: any) => {
           console.log('Hot reload FS event received:', event.payload);
-          // For simplicity in a prototype, we just re-scan the parent directory of the changed file
-          // In a production app, we would selectively insert/delete from local state without hitting the DB fully
           const payload = event.payload as { event_type: string, path: string };
-          
-          // Debounce this in real life to avoid spamming the backend
+
           if (payload.event_type === 'create' || payload.event_type === 'modify') {
-             // We can trigger a partial scan or just re-fetch
-             const lastSep = Math.max(payload.path.lastIndexOf('/'), payload.path.lastIndexOf('\\'));
-             const parentDir = payload.path.substring(0, lastSep);
              try {
-               await invoke("scan_directory", { dirPath: parentDir });
-               const allAssets = await invoke("get_all_assets");
-               setAssets(allAssets as any[]);
+               await invoke("scan_library");
+               await (window as any).__loadAssets?.();
              } catch (e) {
                console.error("Hot reload rescan failed", e);
              }
           } else if (payload.event_type === 'remove') {
              try {
-               await invoke("delete_asset", { id: payload.path });
+               await invoke("delete_assets", { ids: [payload.path] });
                useAssetStore.getState().removeAsset(payload.path);
              } catch (e) {
                console.error("Hot reload delete failed", e);
@@ -130,6 +166,21 @@ function App() {
     }
   }, []);
 
+  // Loading state
+  if (isLoadingLibrary) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-zinc-50 dark:bg-zinc-950">
+        <div className="text-zinc-500">Loading library...</div>
+      </div>
+    )
+  }
+
+  // If no library and initialized, show welcome
+  if (isInitialized && !currentLibrary && (window.__TAURI_INTERNALS__ || window.__TAURI__)) {
+    return <WelcomePage onOpenLibrary={openLibrary} />
+  }
+
+  // Not yet initialized (non-Tauri) or library is open
   return (
     <MainLayout>
       <div className="flex flex-1 overflow-hidden">

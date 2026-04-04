@@ -1,7 +1,8 @@
 import { Image as ImageIcon, FileText, Video, Box, ChevronLeft, ChevronRight, Filter, Grid, List, Search, ChevronDown, Columns, FolderOpen, Trash2, Copy, Edit2, MoveRight, PlusCircle, Tag, Image, Link, Star, HardDrive, Maximize2 } from "lucide-react"
-import { useAssetStore, getSafeArray } from "@/store/useAssetStore"
+import { useAssetStore } from "@/store/useAssetStore"
 import * as ContextMenu from '@radix-ui/react-context-menu'
 import { invoke } from "@tauri-apps/api/core"
+import { convertFileSrc } from "@tauri-apps/api/core"
 import { TagsView } from "./TagsView"
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useRef, useMemo, useEffect, useState, useCallback } from 'react'
@@ -14,6 +15,8 @@ const safeInvoke = async (command: string, args?: any) => {
   }
   console.warn(`Tauri not available, skipped: ${command}`, args)
 }
+
+const isTauri = () => !!(window.__TAURI_INTERNALS__ || window.__TAURI__)
 
 // Simple color distance using euclidean distance in RGB space
 function hexToRgb(hex: string) {
@@ -96,11 +99,17 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
     if (newName && newName !== asset.name) {
       try {
         await safeInvoke("rename_asset", { id: asset.id, newName })
+        // Reload assets to reflect the rename
+        await (window as any).__loadAssets?.()
       } catch (err) {
         alert("重命名失败: " + err)
       }
     }
   }
+
+  // Use convertFileSrc for disk-based images in Tauri
+  const imageSrc = isTauri() ? convertFileSrc(asset.path) : null
+  const isImage = asset.asset_type === 'image'
 
   return (
     <ContextMenu.Root>
@@ -116,20 +125,26 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
               ? "ring-2 ring-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.4)]"
               : "ring-1 ring-zinc-200 dark:ring-zinc-800 hover:ring-zinc-300 dark:hover:ring-zinc-700"
           }`}>
-            {asset.is_missing && (
-              <div className="absolute inset-0 bg-red-500/20 backdrop-blur-[2px] z-10 flex flex-col items-center justify-center text-white">
-                <span className="font-bold drop-shadow-md text-red-500">文件已丢失</span>
-                <span className="text-xs opacity-90 mt-1">请检查本地磁盘</span>
-              </div>
-            )}
-            <div className={`w-full flex items-center justify-center ${!asset.thumbnail_base64 ? getAssetColor(asset.asset_type) : ''} bg-opacity-10 dark:bg-opacity-10`}>
-              {asset.thumbnail_base64 ? (
-                <img 
-                  src={asset.thumbnail_base64} 
-                  alt={asset.name} 
+            <div className={`w-full flex items-center justify-center ${!isImage ? getAssetColor(asset.asset_type) : ''} bg-zinc-100 dark:bg-zinc-900 bg-opacity-10 dark:bg-opacity-10`}>
+              {isImage ? (
+                <img
+                  src={imageSrc || ''}
+                  alt={asset.name}
                   loading="lazy"
                   decoding="async"
-                  className={`w-full ${layoutMode === 'grid' ? 'aspect-square object-cover' : 'h-auto object-contain'} transition-opacity duration-300`} 
+                  className={`w-full ${layoutMode === 'grid' ? 'aspect-square object-cover' : 'h-auto object-contain'} transition-opacity duration-300`}
+                  onError={(e) => {
+                    // Hide broken images and show fallback
+                    (e.target as HTMLImageElement).style.display = 'none'
+                    const parent = (e.target as HTMLImageElement).parentElement
+                    if (parent) {
+                      parent.classList.add(getAssetColor(asset.asset_type).split(' ')[0])
+                      const fallback = document.createElement('div')
+                      fallback.className = 'py-12'
+                      fallback.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`
+                      parent.appendChild(fallback)
+                    }
+                  }}
                 />
               ) : (
                 <div className="py-12">{getAssetIcon(asset.asset_type)}</div>
@@ -137,28 +152,28 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
             </div>
           </div>
           <div className="mt-3 text-center w-full">
-            <p 
+            <p
               className={`text-[13px] font-medium truncate px-2 py-0.5 rounded-md inline-block max-w-full ${
-                isSelected 
-                  ? 'bg-indigo-500 text-white' 
+                isSelected
+                  ? 'bg-indigo-500 text-white'
                   : 'text-zinc-800 dark:text-zinc-200 hover:text-indigo-500'
-              }`} 
+              }`}
               title={asset.name}
             >
               {asset.name}
             </p>
             <p className="text-[11px] text-zinc-400 mt-1">
-              {asset.asset_type === 'image' ? '1011x1400' : asset.asset_type.toUpperCase()}  {(asset.size / 1024).toFixed(1)} KB
+              {asset.width && asset.height ? `${asset.width}x${asset.height}` : asset.asset_type.toUpperCase()}  {(asset.size / 1024).toFixed(1)} KB
             </p>
           </div>
         </div>
       </ContextMenu.Trigger>
 
       <ContextMenu.Portal>
-        <ContextMenu.Content 
+        <ContextMenu.Content
           className="min-w-[180px] bg-white dark:bg-zinc-900 rounded-md overflow-hidden p-1 shadow-[0px_10px_38px_-10px_rgba(22,_23,_24,_0.35),_0px_10px_20px_-15px_rgba(22,_23,_24,_0.2)] border border-zinc-200 dark:border-zinc-800 animate-in fade-in-80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95 z-50"
         >
-          <ContextMenu.Item 
+          <ContextMenu.Item
             onClick={handleOpenDefaultApp}
             className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer justify-between"
           >
@@ -168,17 +183,17 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
             </div>
             <span className="text-xs text-zinc-400 group-data-[highlighted]:text-white/70">Ctrl+O</span>
           </ContextMenu.Item>
-          <ContextMenu.Item 
+          <ContextMenu.Item
             onClick={onShowInFolder}
             className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer"
           >
             <FolderOpen className="w-4 h-4 mr-2 opacity-70" />
             在文件夹中显示
           </ContextMenu.Item>
-          
+
           <ContextMenu.Separator className="h-[1px] bg-zinc-200 dark:bg-zinc-800 m-1" />
-          
-          <ContextMenu.Item 
+
+          <ContextMenu.Item
             className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer justify-between"
           >
             <div className="flex items-center">
@@ -187,7 +202,7 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
             </div>
             <span className="text-xs text-zinc-400 group-data-[highlighted]:text-white/70">F</span>
           </ContextMenu.Item>
-          
+
           <ContextMenu.Sub>
             <ContextMenu.SubTrigger className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[state=open]:bg-indigo-500 data-[state=open]:text-white data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer justify-between">
               <div className="flex items-center">
@@ -197,13 +212,13 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
               <ChevronRight className="w-3.5 h-3.5" />
             </ContextMenu.SubTrigger>
             <ContextMenu.Portal>
-              <ContextMenu.SubContent 
+              <ContextMenu.SubContent
                 className="min-w-[120px] bg-white dark:bg-zinc-900 rounded-md overflow-hidden p-1 shadow-lg border border-zinc-200 dark:border-zinc-800 animate-in fade-in-80 z-50"
                 sideOffset={2}
                 alignOffset={-5}
               >
                 {workspaces && workspaces.length > 0 ? workspaces.map((ws: any) => (
-                  <ContextMenu.Item 
+                  <ContextMenu.Item
                     key={ws.id}
                     onClick={() => onAssignWorkspace(ws.id)}
                     className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none hover:bg-zinc-100 dark:hover:bg-zinc-800 cursor-pointer"
@@ -218,8 +233,8 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
           </ContextMenu.Sub>
 
           <ContextMenu.Separator className="h-[1px] bg-zinc-200 dark:bg-zinc-800 m-1" />
-          
-          <ContextMenu.Item 
+
+          <ContextMenu.Item
             onClick={handleRename}
             className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer justify-between"
           >
@@ -229,26 +244,26 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
             </div>
             <span className="text-xs text-zinc-400 group-data-[highlighted]:text-white/70">F2</span>
           </ContextMenu.Item>
-          <ContextMenu.Item 
+          <ContextMenu.Item
             onClick={handleCopyPath}
             className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer"
           >
             <Copy className="w-4 h-4 mr-2 opacity-70" />
             复制文件路径
           </ContextMenu.Item>
-          
+
           <ContextMenu.Separator className="h-[1px] bg-zinc-200 dark:bg-zinc-800 m-1" />
 
-          <ContextMenu.Item 
+          <ContextMenu.Item
             onClick={onSearchSimilar}
             className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer"
           >
             <Search className="w-4 h-4 mr-2 opacity-70" />
             查找相似图片
           </ContextMenu.Item>
-          
+
           <ContextMenu.Separator className="h-[1px] bg-zinc-200 dark:bg-zinc-800 m-1" />
-          <ContextMenu.Item 
+          <ContextMenu.Item
             className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer justify-between"
           >
             <div className="flex items-center">
@@ -257,31 +272,31 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
             </div>
             <span className="text-xs text-zinc-400 group-data-[highlighted]:text-white/70">T</span>
           </ContextMenu.Item>
-          <ContextMenu.Item 
+          <ContextMenu.Item
             className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer"
           >
             <Image className="w-4 h-4 mr-2 opacity-70" />
             缩略图设置
           </ContextMenu.Item>
-          <ContextMenu.Item 
+          <ContextMenu.Item
             className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer"
           >
             <Link className="w-4 h-4 mr-2 opacity-70" />
             同步关联
           </ContextMenu.Item>
-          
+
           <ContextMenu.Separator className="h-[1px] bg-zinc-200 dark:bg-zinc-800 m-1" />
-          
+
           {activeView === 'trash' ? (
             <>
-              <ContextMenu.Item 
-                onClick={() => onDelete(false)} // Technically restore
+              <ContextMenu.Item
+                onClick={() => onDelete(false)}
                 className="group text-[13px] leading-none text-green-600 dark:text-green-400 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-green-500 data-[highlighted]:text-white cursor-pointer"
               >
                 <Box className="w-4 h-4 mr-2" />
                 还原
               </ContextMenu.Item>
-              <ContextMenu.Item 
+              <ContextMenu.Item
                 onClick={() => onDelete(true)}
                 className="group text-[13px] leading-none text-red-600 dark:text-red-400 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-red-500 data-[highlighted]:text-white cursor-pointer"
               >
@@ -290,7 +305,7 @@ function AssetCard({ asset, isSelected, layoutMode, thumbnailSize, workspaces, o
               </ContextMenu.Item>
             </>
           ) : (
-            <ContextMenu.Item 
+            <ContextMenu.Item
               onClick={() => onDelete(false)}
               className="group text-[13px] leading-none text-red-600 dark:text-red-400 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-red-500 data-[highlighted]:text-white cursor-pointer"
             >
@@ -314,7 +329,7 @@ export function AssetsPage() {
     shapeFilter, setShapeFilter,
     activeView, activeWorkspaceId, workspaces, thumbnailSize, setThumbnailSize, layoutMode, setLayoutMode,
     sortConfig, setSortConfig, similarAssetIds, setSimilarAssetIds, setPreviewAsset,
-    removeAsset, updateAssetProperty, assignAssetToWorkspace
+    removeAsset, updateAssetProperty, assetDetail
   } = useAssetStore()
 
   const [isColorPickerOpen, setIsColorPickerOpen] = useState(false)
@@ -350,11 +365,9 @@ export function AssetsPage() {
     } else if (e.shiftKey && selectedAssets.length > 0) {
       // Range selection
       const lastSelectedId = selectedAssets[selectedAssets.length - 1];
-      
+
       if (layoutMode === 'masonry') {
         // Spatial selection for Masonry
-        // Iterate all .selectable-asset elements and compare data-id directly
-        // (avoiding querySelector which breaks on file paths with backslashes on Windows)
         const allElements = document.querySelectorAll('.selectable-asset');
         let lastEl: Element | null = null;
         let currEl: Element | null = null;
@@ -394,12 +407,12 @@ export function AssetsPage() {
         // Array index selection for Grid (Virtualizer ensures visual order = array order)
         const lastIndex = filteredAssets.findIndex(a => a.id === lastSelectedId);
         const currentIndex = filteredAssets.findIndex(a => a.id === assetId);
-        
+
         if (lastIndex !== -1 && currentIndex !== -1) {
           const start = Math.min(lastIndex, currentIndex);
           const end = Math.max(lastIndex, currentIndex);
           const rangeIds = filteredAssets.slice(start, end + 1).map(a => a.id);
-          
+
           setSelectedAssets(Array.from(new Set([...selectedAssets, ...rangeIds])));
         } else {
           setSelectedAssets([assetId]);
@@ -420,32 +433,25 @@ export function AssetsPage() {
   const handleRestoreAsset = async (id: string) => {
     try {
       updateAssetProperty(id, { is_trashed: false })
-      await safeInvoke("update_asset", { 
-        id, 
+      await safeInvoke("update_asset", {
+        id,
         is_trashed: false,
-        tags: assets.find(a => a.id === id)?.tags || null,
-        description: assets.find(a => a.id === id)?.description || null,
-        rating: assets.find(a => a.id === id)?.rating || null,
-        workspace_ids: assets.find(a => a.id === id)?.workspace_ids || null
       })
     } catch (err) {
       console.error("Failed to restore asset:", err)
     }
   }
+
   const handleDeleteAsset = async (id: string, hardDelete: boolean = false) => {
     try {
       if (hardDelete) {
-        await safeInvoke("delete_asset", { id })
+        await safeInvoke("delete_assets", { ids: [id] })
         removeAsset(id)
       } else {
         updateAssetProperty(id, { is_trashed: true })
-        await safeInvoke("update_asset", { 
-          id, 
+        await safeInvoke("update_asset", {
+          id,
           is_trashed: true,
-          tags: assets.find(a => a.id === id)?.tags || null,
-          description: assets.find(a => a.id === id)?.description || null,
-          rating: assets.find(a => a.id === id)?.rating || null,
-          workspace_ids: assets.find(a => a.id === id)?.workspace_ids || null
         })
       }
     } catch (err) {
@@ -475,21 +481,12 @@ export function AssetsPage() {
     }
   }
 
-  // Get all unique tags from all assets safely
-  const allTags = Array.from(new Set(
-    assets.flatMap(a => {
-      if (!a.tags) return []
-      try {
-        const parsed = JSON.parse(a.tags)
-        return Array.isArray(parsed) ? parsed : []
-      } catch (e) {
-        return Array.isArray(a.tags) ? a.tags : []
-      }
-    })
-  ))
+  // Tags are no longer available on AssetLite; we use an empty list for now.
+  // Tag filtering will need server-side support or a dedicated tag cache.
+  const allTags: string[] = []
 
-  const activeWorkspaceName = activeView === 'workspace' && activeWorkspaceId 
-    ? workspaces.find(w => w.id === activeWorkspaceId)?.name 
+  const activeWorkspaceName = activeView === 'workspace' && activeWorkspaceId
+    ? workspaces.find(w => w.id === activeWorkspaceId)?.name
     : activeView === 'trash' ? "废纸篓"
     : activeView === 'unorganized' ? "待整理文件"
     : "全部文件"
@@ -502,57 +499,36 @@ export function AssetsPage() {
       if (asset.is_trashed) return false;
     }
 
+    // Note: "unorganized" and "workspace" filters now need server-side support
+    // since AssetLite doesn't carry tags/workspace_ids. For now, show all non-trashed assets.
     if (activeView === 'unorganized') {
-      const tags = getSafeArray(asset.tags);
-      const workspaces = getSafeArray(asset.workspace_ids);
-      if (tags.length > 0 || workspaces.length > 0) return false;
+      // Would need detail data - skip filtering for now
     }
 
     // Similar Search filter (highest priority if active)
     if (similarAssetIds) {
       return similarAssetIds.includes(asset.id);
     }
-    
-    // Workspace filter
-    let matchesWorkspace = activeView !== 'workspace';
-    if (!matchesWorkspace && asset.workspace_ids) {
-      try {
-        const parsedWs = JSON.parse(asset.workspace_ids as any as string);
-        matchesWorkspace = Array.isArray(parsedWs) && parsedWs.includes(activeWorkspaceId);
-      } catch (e) {
-        if (Array.isArray(asset.workspace_ids)) {
-          matchesWorkspace = (asset.workspace_ids as unknown as string[]).includes(activeWorkspaceId!);
-        }
-      }
-    }
 
-    // Search filter (name, desc, tags)
+    // Workspace filter - needs server-side support
+    // For now, skip workspace filtering on client side
+
+    // Search filter (name only, since tags/description are in detail)
     let matchesSearch = true;
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
-      const matchName = asset.name.toLowerCase().includes(q);
-      const matchDesc = asset.description?.toLowerCase().includes(q) || false;
-      const matchTags = asset.tags?.toLowerCase().includes(q) || false;
-      matchesSearch = matchName || matchDesc || matchTags;
+      matchesSearch = asset.name.toLowerCase().includes(q);
     }
-    
+
     // Type filter
     let matchesType = true;
     if (typeFilter && typeFilter.length > 0) {
       matchesType = typeFilter.includes(asset.asset_type);
     }
 
-    // Tag filter
-    let matchesTag = true;
-    if (tagFilter && tagFilter.length > 0) {
-      try {
-        const parsedTags = getSafeArray(asset.tags);
-        matchesTag = tagFilter.some(t => parsedTags.includes(t));
-      } catch (e) {
-        matchesTag = false;
-      }
-    }
-    
+    // Tag filter - would need server-side support
+    // For now, skip tag filtering
+
     // Folder filter
     let matchesFolder = true;
     if (folderFilter && folderFilter.length > 0) {
@@ -606,11 +582,11 @@ export function AssetsPage() {
       }
     }
 
-    return matchesWorkspace && matchesSearch && matchesType && matchesTag && matchesColor && matchesFolder && matchesSize && matchesRating && matchesShape
+    return matchesSearch && matchesType && matchesColor && matchesFolder && matchesSize && matchesRating && matchesShape
   }).sort((a, b) => {
     const { field, order } = sortConfig
     let comparison = 0
-    
+
     switch (field) {
       case 'name':
         comparison = a.name.localeCompare(b.name)
@@ -628,7 +604,7 @@ export function AssetsPage() {
         comparison = (a.modified_at || 0) - (b.modified_at || 0)
         break
     }
-    
+
     return order === 'asc' ? comparison : -comparison
   })
 
@@ -984,7 +960,7 @@ export function AssetsPage() {
               }
             }}
           />
-          <div 
+          <div
             ref={parentRef}
             className="flex-1 overflow-y-auto p-6 bg-white dark:bg-[#121212]"
           >
@@ -995,18 +971,18 @@ export function AssetsPage() {
               </div>
             ) : layoutMode === 'masonry' ? (
               // Non-virtualized Masonry fallback for complex layouts
-              <div 
-                style={{ 
-                  columnWidth: `${thumbnailSize}px`, 
-                  columnGap: '24px' 
+              <div
+                style={{
+                  columnWidth: `${thumbnailSize}px`,
+                  columnGap: '24px'
                 }}
               >
                 {filteredAssets.map((asset) => {
                   const isSelected = selectedAssets.includes(asset.id);
                   return (
-                    <AssetCard 
-                      key={asset.id} 
-                      asset={asset} 
+                    <AssetCard
+                      key={asset.id}
+                      asset={asset}
                       isSelected={isSelected}
                       layoutMode={layoutMode}
                       thumbnailSize={thumbnailSize}
@@ -1018,10 +994,10 @@ export function AssetsPage() {
                       onSearchSimilar={() => handleSearchSimilar(asset.id)}
                       onDelete={(hard: boolean) => handleDeleteAsset(asset.id, hard)}
                       onAssignWorkspace={(wsId: string) => {
-                        assignAssetToWorkspace(asset.id, wsId);
+                        // Workspace assignment now requires detail data
                         safeInvoke("update_asset", {
                           id: asset.id,
-                          workspace_ids: JSON.stringify([...getSafeArray(asset.workspace_ids), wsId])
+                          workspace_ids: JSON.stringify([wsId]),
                         });
                       }}
                       activeView={activeView}
@@ -1057,14 +1033,14 @@ export function AssetsPage() {
                     {Array.from({ length: columnCount }).map((_, columnIndex) => {
                       const assetIndex = virtualRow.index * columnCount + columnIndex
                       const asset = filteredAssets[assetIndex]
-                      
+
                       if (!asset) return <div key={columnIndex} />
 
                       const isSelected = selectedAssets.includes(asset.id);
                       return (
-                        <AssetCard 
-                          key={asset.id} 
-                          asset={asset} 
+                        <AssetCard
+                          key={asset.id}
+                          asset={asset}
                           isSelected={isSelected}
                           layoutMode={layoutMode}
                           thumbnailSize={thumbnailSize}
@@ -1076,10 +1052,9 @@ export function AssetsPage() {
                           onSearchSimilar={() => handleSearchSimilar(asset.id)}
                           onDelete={(hard: boolean) => handleDeleteAsset(asset.id, hard)}
                           onAssignWorkspace={(wsId: string) => {
-                            assignAssetToWorkspace(asset.id, wsId);
                             safeInvoke("update_asset", {
                               id: asset.id,
-                              workspace_ids: JSON.stringify([...getSafeArray(asset.workspace_ids), wsId])
+                              workspace_ids: JSON.stringify([wsId]),
                             });
                           }}
                           activeView={activeView}
@@ -1093,31 +1068,31 @@ export function AssetsPage() {
           </div>
         </ContextMenu.Trigger>
         <ContextMenu.Portal>
-          <ContextMenu.Content 
+          <ContextMenu.Content
             className="min-w-[200px] bg-white dark:bg-zinc-900 rounded-md overflow-hidden p-1 shadow-[0px_10px_38px_-10px_rgba(22,_23,_24,_0.35),_0px_10px_20px_-15px_rgba(22,_23,_24,_0.2)] border border-zinc-200 dark:border-zinc-800 animate-in fade-in-80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95 z-40"
           >
-            <ContextMenu.Item 
+            <ContextMenu.Item
               className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer justify-between"
             >
               <span>在文件资源管理器中打开</span>
               <span className="text-xs text-zinc-400 group-data-[highlighted]:text-white/70">Ctrl+Enter</span>
             </ContextMenu.Item>
             <ContextMenu.Separator className="h-[1px] bg-zinc-200 dark:bg-zinc-800 m-1" />
-            <ContextMenu.Item 
+            <ContextMenu.Item
               onClick={() => document.getElementById('global-import-btn')?.click()}
               className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer"
             >
               导入文件
             </ContextMenu.Item>
             <ContextMenu.Separator className="h-[1px] bg-zinc-200 dark:bg-zinc-800 m-1" />
-            <ContextMenu.Item 
+            <ContextMenu.Item
               onClick={() => document.getElementById('global-left-sidebar-btn')?.click()}
               className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer justify-between"
             >
               <span>隐藏左侧栏</span>
               <span className="text-xs text-zinc-400 group-data-[highlighted]:text-white/70">Shift+Tab</span>
             </ContextMenu.Item>
-            <ContextMenu.Item 
+            <ContextMenu.Item
               onClick={() => document.getElementById('global-right-sidebar-btn')?.click()}
               className="group text-[13px] leading-none text-zinc-700 dark:text-zinc-300 rounded-[3px] flex items-center h-8 px-2 relative select-none outline-none data-[disabled]:text-zinc-400 data-[disabled]:pointer-events-none data-[highlighted]:bg-indigo-500 data-[highlighted]:text-white cursor-pointer justify-between"
             >

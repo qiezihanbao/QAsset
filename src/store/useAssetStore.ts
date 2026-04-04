@@ -170,6 +170,7 @@ interface AssetStore {
   resetForNewLibrary: () => void
 
   // ── Actions: Workspaces ──────────────────────────────────────────
+  setWorkspaces: (workspaces: Workspace[]) => void
   addWorkspace: (name: string) => void
   assignAssetToWorkspace: (assetId: string, workspaceId: string) => void
   removeAssetFromWorkspace: (assetId: string, workspaceId: string) => void
@@ -310,6 +311,7 @@ export const useAssetStore = create<AssetStore>((set) => ({
   }),
 
   // ── Actions: Workspaces ──────────────────────────────────────────
+  setWorkspaces: (workspaces) => set({ workspaces }),
   addWorkspace: (name) => set((state) => ({
     workspaces: [...state.workspaces, { id: Math.random().toString(36).substr(2, 9), name }]
   })),

@@ -1,25 +1,42 @@
 import { useState, useEffect } from "react"
 import { ExternalLink, Star, Plus, X } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
-import { useAssetStore } from "@/store/useAssetStore"
+import { useAssetStore, getSafeArray } from "@/store/useAssetStore"
 import { isMobile } from "@/lib/utils"
+import type { AssetDetail } from "@/store/useAssetStore"
 
 const hasTauriRuntime = () => Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__)
 
 export function RightSidebar() {
-  const { assets, selectedAssets, workspaces, updateAssetProperty, setSimilarAssetIds, toggleRightSidebar } = useAssetStore()
+  const {
+    assets, selectedAssets, workspaces, assetDetail, setAssetDetail,
+    updateAssetProperty, setSimilarAssetIds, toggleRightSidebar
+  } = useAssetStore()
   const selectedAsset = assets.find((asset) => asset.id === selectedAssets[0]) ?? null
   const [descInput, setDescInput] = useState("")
   const [sourceUrlInput, setSourceUrlInput] = useState("")
   const [tagInput, setTagInput] = useState("")
   const [isSearchingSimilar, setIsSearchingSimilar] = useState(false)
-  
+
+  // Fetch asset detail from backend when selection changes
   useEffect(() => {
-    if (selectedAsset) {
-      setDescInput(selectedAsset.description || "")
-      setSourceUrlInput(selectedAsset.source_url || "")
+    if (selectedAsset && hasTauriRuntime()) {
+      invoke<AssetDetail>('get_asset_detail', { id: selectedAsset.id })
+        .then((detail) => {
+          setAssetDetail(detail)
+          setDescInput(detail.description || "")
+          setSourceUrlInput(detail.source_url || "")
+        })
+        .catch((e) => console.error('Failed to load asset detail:', e))
+    } else if (selectedAsset) {
+      // Non-Tauri fallback - no detail available
+      setDescInput("")
+      setSourceUrlInput("")
+      setAssetDetail(null)
+    } else {
+      setAssetDetail(null)
     }
-  }, [selectedAsset])
+  }, [selectedAsset?.id])
 
   if (!selectedAsset) {
     return (
@@ -50,82 +67,66 @@ export function RightSidebar() {
     }
   }
 
+  // Helper to get detail field with fallback
+  const detail = assetDetail
+  const detailTags = detail ? getSafeArray(detail.tags) : []
+  const detailWorkspaceIds = detail ? getSafeArray(detail.workspace_ids) : []
+
   const handleUpdateSourceUrl = async () => {
-    if (sourceUrlInput === selectedAsset.source_url) return
-    updateAssetProperty(selectedAsset.id, { source_url: sourceUrlInput })
+    if (!detail || sourceUrlInput === (detail.source_url || '')) return
     try {
       await safeInvoke("update_asset", {
         id: selectedAsset.id,
-        tags: selectedAsset.tags || null,
-        description: selectedAsset.description || null,
-        rating: selectedAsset.rating || null,
-        workspace_ids: selectedAsset.workspace_ids || null,
-        source_url: sourceUrlInput || null
+        source_url: sourceUrlInput || null,
       })
+      // Refresh detail
+      setAssetDetail({ ...detail, source_url: sourceUrlInput || undefined })
     } catch (err) {
       console.error("Failed to update source URL:", err)
     }
   }
 
   const handleUpdateDesc = async () => {
-    if (descInput === selectedAsset.description) return
-    updateAssetProperty(selectedAsset.id, { description: descInput })
+    if (!detail || descInput === (detail.description || '')) return
     try {
       await safeInvoke("update_asset", {
         id: selectedAsset.id,
-        tags: selectedAsset.tags || null,
-        description: descInput,
-        rating: selectedAsset.rating || null,
-        workspace_ids: selectedAsset.workspace_ids || null
+        description: descInput || null,
       })
+      setAssetDetail({ ...detail, description: descInput || undefined })
     } catch (err) {
       console.error("Failed to update description:", err)
     }
   }
 
   const handleRating = async (rating: number) => {
-    const newRating = selectedAsset.rating === rating ? 0 : rating
+    const newRating = (detail?.rating || 0) === rating ? 0 : rating
     updateAssetProperty(selectedAsset.id, { rating: newRating })
     try {
       await safeInvoke("update_asset", {
         id: selectedAsset.id,
-        tags: selectedAsset.tags || null,
-        description: selectedAsset.description || null,
         rating: newRating || null,
-        workspace_ids: selectedAsset.workspace_ids || null
       })
+      if (detail) {
+        setAssetDetail({ ...detail, rating: newRating || undefined })
+      }
     } catch (err) {
       console.error("Failed to update rating:", err)
     }
   }
 
-  const getSafeArray = (jsonStr: string | string[] | null | undefined): string[] => {
-    if (!jsonStr) return []
-    if (Array.isArray(jsonStr)) return jsonStr
-    try {
-      const parsed = JSON.parse(jsonStr)
-      return Array.isArray(parsed) ? parsed : []
-    } catch {
-      return []
-    }
-  }
-
   const handleAddTag = async (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' && tagInput.trim()) {
-      const currentTags = getSafeArray(selectedAsset.tags)
-      if (!currentTags.includes(tagInput.trim())) {
-        const newTags = [...currentTags, tagInput.trim()]
+    if (e.key === 'Enter' && tagInput.trim() && detail) {
+      if (!detailTags.includes(tagInput.trim())) {
+        const newTags = [...detailTags, tagInput.trim()]
         const newTagsStr = JSON.stringify(newTags)
-        updateAssetProperty(selectedAsset.id, { tags: newTagsStr })
         setTagInput("")
         try {
           await safeInvoke("update_asset", {
             id: selectedAsset.id,
             tags: newTagsStr,
-            description: selectedAsset.description || null,
-            rating: selectedAsset.rating || null,
-            workspace_ids: selectedAsset.workspace_ids || null
           })
+          setAssetDetail({ ...detail, tags: newTagsStr })
         } catch (err) {
           console.error("Failed to update tags:", err)
         }
@@ -134,44 +135,38 @@ export function RightSidebar() {
   }
 
   const handleRemoveTag = async (tagToRemove: string) => {
-    const currentTags = getSafeArray(selectedAsset.tags)
-    const newTags = currentTags.filter((t: string) => t !== tagToRemove)
+    if (!detail) return
+    const newTags = detailTags.filter((t: string) => t !== tagToRemove)
     const newTagsStr = newTags.length > 0 ? JSON.stringify(newTags) : null
-    updateAssetProperty(selectedAsset.id, { tags: newTagsStr || undefined })
     try {
       await safeInvoke("update_asset", {
         id: selectedAsset.id,
         tags: newTagsStr,
-        description: selectedAsset.description || null,
-        rating: selectedAsset.rating || null,
-        workspace_ids: selectedAsset.workspace_ids || null
       })
+      setAssetDetail({ ...detail, tags: newTagsStr || undefined })
     } catch (error) {
       console.error("Failed to update tags:", error)
     }
   }
 
   const handleToggleWorkspace = async (workspaceId: string) => {
-    const currentWsIds = getSafeArray(selectedAsset.workspace_ids)
+    if (!detail) return
     let newWsIds: string[]
-    
-    if (currentWsIds.includes(workspaceId)) {
-      newWsIds = currentWsIds.filter((id: string) => id !== workspaceId)
+
+    if (detailWorkspaceIds.includes(workspaceId)) {
+      newWsIds = detailWorkspaceIds.filter((id: string) => id !== workspaceId)
     } else {
-      newWsIds = [...currentWsIds, workspaceId]
+      newWsIds = [...detailWorkspaceIds, workspaceId]
     }
-    
+
     const newWsIdsStr = newWsIds.length > 0 ? JSON.stringify(newWsIds) : undefined
-    updateAssetProperty(selectedAsset.id, { workspace_ids: newWsIdsStr })
-    
+
     try {
       await safeInvoke("update_asset", {
         id: selectedAsset.id,
-        tags: selectedAsset.tags || null,
-        description: selectedAsset.description || null,
-        rating: selectedAsset.rating || null,
-        workspace_ids: newWsIdsStr || null
+        workspace_ids: newWsIdsStr || null,
       })
+      setAssetDetail({ ...detail, workspace_ids: newWsIdsStr })
     } catch (err) {
       console.error("Failed to update workspaces:", err)
     }
@@ -182,10 +177,9 @@ export function RightSidebar() {
     try {
       const similarIds = await safeInvoke("find_similar_images", {
         targetId: selectedAsset.id,
-        threshold: 15 // Adjust perceptual hash distance threshold (0-64)
+        threshold: 15
       })
       if (Array.isArray(similarIds)) {
-        // Include the target asset itself in the results
         setSimilarAssetIds([selectedAsset.id, ...similarIds])
       }
     } catch (err) {
@@ -222,13 +216,13 @@ export function RightSidebar() {
         {!isMobile && (
           <h2 className="mb-6 text-center text-sm font-semibold text-zinc-900 dark:text-zinc-100">文件信息</h2>
         )}
-        
+
         <div className="space-y-6">
           <div>
             <h3 className="text-[13px] font-bold text-zinc-900 dark:text-zinc-100 mb-4 break-all">
               {selectedAsset.name}
             </h3>
-            
+
             <div className="space-y-4">
               {/* Folder */}
               <div>
@@ -246,14 +240,14 @@ export function RightSidebar() {
                 <p className="text-xs text-zinc-500 mb-1.5">分配工作区</p>
                 <div className="flex flex-wrap gap-2">
                   {workspaces.map(ws => {
-                    const isAssigned = getSafeArray(selectedAsset.workspace_ids).includes(ws.id)
+                    const isAssigned = detailWorkspaceIds.includes(ws.id)
                     return (
                       <button
                         key={ws.id}
                         onClick={() => handleToggleWorkspace(ws.id)}
                         className={`px-2 py-1 text-xs rounded-md border transition-colors ${
-                          isAssigned 
-                            ? 'bg-indigo-50 dark:bg-indigo-500/10 border-indigo-200 dark:border-indigo-500/20 text-indigo-600 dark:text-indigo-400' 
+                          isAssigned
+                            ? 'bg-indigo-50 dark:bg-indigo-500/10 border-indigo-200 dark:border-indigo-500/20 text-indigo-600 dark:text-indigo-400'
                             : 'bg-transparent border-zinc-200 dark:border-zinc-800 text-zinc-500 hover:border-zinc-300 dark:hover:border-zinc-700'
                         }`}
                       >
@@ -268,7 +262,7 @@ export function RightSidebar() {
               <div>
                 <p className="text-xs text-zinc-500 mb-1.5">标签</p>
                 <div className="flex flex-wrap gap-2 mb-2">
-                  {getSafeArray(selectedAsset.tags).map((tag: string) => (
+                  {detailTags.map((tag: string) => (
                     <span key={tag} className="inline-flex items-center gap-1 px-2 py-1 bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 text-xs rounded-md">
                       {tag}
                       <button onClick={() => handleRemoveTag(tag)} className="hover:text-red-500 transition-colors">
@@ -306,7 +300,7 @@ export function RightSidebar() {
               {selectedAsset.asset_type === 'image' && (
                 <div>
                   <p className="text-xs text-zinc-500 mb-1.5">智能工具</p>
-                  <button 
+                  <button
                     onClick={handleSearchSimilar}
                     disabled={isSearchingSimilar}
                     className="w-full py-1.5 px-3 bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 text-[13px] rounded-md transition-colors flex items-center justify-center gap-2"
@@ -328,10 +322,10 @@ export function RightSidebar() {
                     placeholder="添加来源网址..."
                     className="w-full p-2 bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-md text-[13px] text-zinc-700 dark:text-zinc-300 focus:outline-none focus:border-indigo-500 transition-colors"
                   />
-                  {selectedAsset.source_url && (
-                    <a href={selectedAsset.source_url} target="_blank" rel="noreferrer" className="text-[13px] text-indigo-500 hover:underline flex items-start gap-1 group break-all">
+                  {detail?.source_url && (
+                    <a href={detail.source_url} target="_blank" rel="noreferrer" className="text-[13px] text-indigo-500 hover:underline flex items-start gap-1 group break-all">
                       <span className="line-clamp-3">
-                        {selectedAsset.source_url}
+                        {detail.source_url}
                       </span>
                       <ExternalLink className="w-3.5 h-3.5 mt-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
                     </a>
@@ -350,8 +344,8 @@ export function RightSidebar() {
                 <div className="flex text-zinc-300 dark:text-zinc-700">
           {[1, 2, 3, 4, 5].map((star) => (
             <button key={star} onClick={() => handleRating(star)} className="focus:outline-none transition-colors">
-              <Star 
-                className={`w-3.5 h-3.5 ${(selectedAsset.rating || 0) >= star ? "fill-yellow-400 text-yellow-400" : "hover:text-yellow-400"}`} 
+              <Star
+                className={`w-3.5 h-3.5 ${(detail?.rating || selectedAsset.rating || 0) >= star ? "fill-yellow-400 text-yellow-400" : "hover:text-yellow-400"}`}
               />
             </button>
           ))}
@@ -369,10 +363,10 @@ export function RightSidebar() {
                 <span className="text-zinc-500">文件大小</span>
                 <span className="text-zinc-700 dark:text-zinc-300">{formatSize(selectedAsset.size)}</span>
               </div>
-              {selectedAsset.duration && (
+              {detail?.duration && (
                 <div className="flex justify-between">
                   <span className="text-zinc-500">时长</span>
-                  <span className="text-zinc-700 dark:text-zinc-300">{Math.round(selectedAsset.duration)}s</span>
+                  <span className="text-zinc-700 dark:text-zinc-300">{Math.round(detail.duration)}s</span>
                 </div>
               )}
               <div className="flex justify-between">
@@ -385,7 +379,7 @@ export function RightSidebar() {
               </div>
             </div>
           </div>
-          
+
         </div>
       </div>
     </aside>

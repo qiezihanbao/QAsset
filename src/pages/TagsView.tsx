@@ -1,27 +1,37 @@
-import { useAssetStore, getSafeArray } from "@/store/useAssetStore"
+import { useState, useEffect } from "react"
+import { invoke } from "@tauri-apps/api/core"
+import { useAssetStore } from "@/store/useAssetStore"
+
+const isTauri = () => !!(window.__TAURI_INTERNALS__ || window.__TAURI__)
 
 export function TagsView() {
-  const { assets, setActiveView, setTagFilter } = useAssetStore()
-  
-  // Get all unique tags and count them
-  const tagCounts: Record<string, number> = {}
-  assets.filter(a => !a.is_trashed).forEach(asset => {
-    const tags = getSafeArray(asset.tags)
-    tags.forEach(tag => {
-      if (tagCounts[tag]) {
-        tagCounts[tag]++
-      } else {
-        tagCounts[tag] = 1
-      }
-    })
-  })
+  const { setActiveView, setTagFilter } = useAssetStore()
+  const [tagCounts, setTagCounts] = useState<Record<string, number>>({})
+  const [isLoading, setIsLoading] = useState(true)
+
+  useEffect(() => {
+    loadTags()
+  }, [])
+
+  async function loadTags() {
+    if (!isTauri()) {
+      setIsLoading(false)
+      return
+    }
+
+    try {
+      const counts = await invoke('get_tags_summary') as Record<string, number>
+      setTagCounts(counts)
+    } catch (e) {
+      console.error('Failed to load tags summary:', e)
+    }
+    setIsLoading(false)
+  }
 
   // Group tags by first letter (Pinyin/English)
-  // For simplicity, we just group by the first character, uppercase.
   const getFirstChar = (str: string) => {
     const char = str.charAt(0).toUpperCase()
     if (/[A-Z]/.test(char)) return char
-    // Fallback for Chinese characters or others (could use a pinyin library, but for now group into '#')
     return '#'
   }
 
@@ -37,7 +47,17 @@ export function TagsView() {
 
   const handleTagClick = (tag: string) => {
     setTagFilter([tag])
-    setActiveView('all') // Switch to all view with the tag filter applied
+    setActiveView('all')
+  }
+
+  if (isLoading) {
+    return (
+      <div className="flex-1 flex flex-col h-full bg-white dark:bg-[#121212] overflow-hidden">
+        <div className="flex-1 flex items-center justify-center text-zinc-500">
+          Loading tags...
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -45,7 +65,7 @@ export function TagsView() {
       <div className="flex-1 overflow-y-auto p-8">
         <div className="max-w-4xl mx-auto">
           <h2 className="text-2xl font-bold mb-8 text-zinc-900 dark:text-white">全部标签</h2>
-          
+
           {Object.keys(tagCounts).length === 0 ? (
             <div className="text-zinc-500 flex flex-col items-center justify-center py-20">
               <p>暂无标签</p>
