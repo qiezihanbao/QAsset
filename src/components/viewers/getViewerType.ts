@@ -18,7 +18,7 @@ const MARKDOWN_EXTENSIONS = new Set(['md'])
 
 const PDF_EXTENSIONS = new Set(['pdf'])
 
-export type ViewerType = 'image' | 'pdf' | 'text' | 'markdown' | 'unsupported'
+export type ViewerType = 'image' | 'pdf' | 'text' | 'markdown' | 'video' | 'unsupported'
 
 export function getViewerType(fileName: string, assetType: string): ViewerType {
   const ext = fileName.includes('.')
@@ -29,6 +29,7 @@ export function getViewerType(fileName: string, assetType: string): ViewerType {
   if (MARKDOWN_EXTENSIONS.has(ext)) return 'markdown'
   if (TEXT_EXTENSIONS.has(ext)) return 'text'
   if (IMAGE_EXTENSIONS.has(ext) || assetType === 'image' || assetType === 'vector') return 'image'
+  if (assetType === 'video') return 'video'
   return 'unsupported'
 }
 

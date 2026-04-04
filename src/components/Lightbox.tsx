@@ -7,6 +7,7 @@ import { ImageViewer, MIN_ZOOM, MAX_ZOOM, ZOOM_STEP, WHEEL_ZOOM_FACTOR } from "@
 import { PdfViewer } from "@/components/viewers/PdfViewer"
 import { TextViewer } from "@/components/viewers/TextViewer"
 import { MarkdownViewer } from "@/components/viewers/MarkdownViewer"
+import { VideoViewer } from "@/components/viewers/VideoViewer"
 import { UnsupportedViewer } from "@/components/viewers/UnsupportedViewer"
 
 export function Lightbox() {
@@ -109,6 +110,8 @@ export function Lightbox() {
         return <TextViewer filePath={previewAsset.path} fileName={previewAsset.name} />
       case 'markdown':
         return <MarkdownViewer filePath={previewAsset.path} fileName={previewAsset.name} />
+      case 'video':
+        return <VideoViewer filePath={previewAsset.path} fileName={previewAsset.name} />
       default:
         return (
           <UnsupportedViewer
