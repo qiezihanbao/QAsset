@@ -36,7 +36,7 @@ export function WelcomePage({ onOpenLibrary }: { onOpenLibrary: (path: string) =
   }
 
   return (
-    <div className="flex items-center justify-center h-screen bg-zinc-50 dark:bg-zinc-950">
+    <div className="flex h-full items-center justify-center bg-zinc-50 dark:bg-zinc-950">
       <div className="text-center max-w-md w-full px-6">
         <div className="w-16 h-16 rounded-2xl bg-indigo-500 flex items-center justify-center mx-auto mb-6 shadow-lg">
           <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>

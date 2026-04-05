@@ -1,10 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from "react"
-import { Menu, Target, CheckSquare, Tags, Trash2, Box, Folder, Plus, ChevronRight, ChevronDown, Check, X } from "lucide-react"
+import { createPortal } from "react-dom"
+import { Menu, Target, CheckSquare, Tags, Trash2, Box, Folder, Plus, ChevronRight, ChevronDown, Check, X, Sparkles, FolderOpen, Settings2, RefreshCw, SunMoon, Sun, Moon } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
-import { useAssetStore, type ViewType, type Workspace } from "@/store/useAssetStore"
+import { open } from "@tauri-apps/plugin-dialog"
+import { useAssetStore, type ViewType, type Workspace, type RegistryEntry } from "@/store/useAssetStore"
 import * as ContextMenu from '@radix-ui/react-context-menu'
 import { isMobile } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
+import { useTheme, type ThemeMode } from "@/hooks/useTheme"
 
 interface FolderInfo {
   path: string
@@ -26,6 +29,7 @@ interface CountQueryResult {
 
 type QuickAssetWindow = Window & {
   __loadAssets?: () => Promise<void> | void
+  __openLibrary?: (path: string) => Promise<void>
 }
 
 const loadAssetsFromWindow = async () => {
@@ -33,7 +37,13 @@ const loadAssetsFromWindow = async () => {
   await quickWindow.__loadAssets?.()
 }
 
-type ShortcutKey = 'all' | 'unorganized' | 'tags' | 'trash'
+const themeOptions: Array<{ mode: ThemeMode; label: string; icon: React.ReactNode }> = [
+  { mode: "system", label: "跟随系统", icon: <SunMoon className="h-3.5 w-3.5" /> },
+  { mode: "light", label: "浅色", icon: <Sun className="h-3.5 w-3.5" /> },
+  { mode: "dark", label: "深色", icon: <Moon className="h-3.5 w-3.5" /> },
+]
+
+type ShortcutKey = 'all' | 'unorganized' | 'tags' | 'similar' | 'trash'
 
 interface ContextCheckboxMenuItemProps {
   checked: boolean
@@ -65,17 +75,22 @@ export function LeftSidebar() {
     assets, workspaces, setWorkspaces, activeWorkspaceId, activeView,
     folderFilter, folderPreviewVisibility, setFolderPreviewVisibility,
     addWorkspace, toggleLeftSidebar, currentLibrary, currentLibraryPath,
+    recentLibraries, setRecentLibraries,
   ] = useAssetStore(useShallow((s) => ([
     s.assets, s.workspaces, s.setWorkspaces, s.activeWorkspaceId, s.activeView,
     s.folderFilter, s.folderPreviewVisibility, s.setFolderPreviewVisibility,
     s.addWorkspace, s.toggleLeftSidebar, s.currentLibrary, s.currentLibraryPath,
+    s.recentLibraries, s.setRecentLibraries,
   ])))
   const [isMenuOpen, setIsMenuOpen] = useState(false)
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false)
+  const [isSettingsBusy, setIsSettingsBusy] = useState(false)
   const [isAddingWorkspace, setIsAddingWorkspace] = useState(false)
   const [newWorkspaceName, setNewWorkspaceName] = useState("")
   const [showAllWorkspaces, setShowAllWorkspaces] = useState(false)
   const [folders, setFolders] = useState<FolderInfo[]>([])
   const [workspaceCounts, setWorkspaceCounts] = useState<Record<string, number>>({})
+  const [unorganizedCount, setUnorganizedCount] = useState(0)
   const [libraryStats, setLibraryStats] = useState<LibraryStats>({
     active_count: 0,
     trashed_count: 0,
@@ -85,9 +100,11 @@ export function LeftSidebar() {
     all: true,
     unorganized: true,
     tags: true,
+    similar: true,
     trash: true
   })
   const [isRootTreeExpanded, setIsRootTreeExpanded] = useState(false)
+  const { themeMode, setThemeMode } = useTheme()
   const lastNonFolderSelectionRef = useRef<{ view: ViewType; workspaceId: string | null }>({
     view: activeView,
     workspaceId: activeWorkspaceId ?? null,
@@ -226,6 +243,30 @@ export function LeftSidebar() {
     }
   }, [currentLibraryPath, workspaces])
 
+  const loadUnorganizedCount = useCallback(async () => {
+    if (!(window.__TAURI_INTERNALS__ || window.__TAURI__)) return
+    if (!currentLibraryPath) {
+      setUnorganizedCount(0)
+      return
+    }
+
+    try {
+      const result = await invoke<CountQueryResult>('query_assets', {
+        filters: {
+          unorganized: true,
+          is_trashed: false,
+          sort_field: 'created_at',
+          sort_order: 'desc',
+          page: 1,
+          page_size: 1,
+        }
+      })
+      setUnorganizedCount(Number(result?.total_count || 0))
+    } catch (e) {
+      console.warn('Failed to load unorganized count:', e)
+    }
+  }, [currentLibraryPath])
+
   const loadLibraryStats = useCallback(async () => {
     if (!(window.__TAURI_INTERNALS__ || window.__TAURI__)) return
     if (!currentLibraryPath) {
@@ -260,6 +301,10 @@ export function LeftSidebar() {
   }, [loadWorkspaceCounts, assets.length])
 
   useEffect(() => {
+    loadUnorganizedCount()
+  }, [loadUnorganizedCount, assets.length])
+
+  useEffect(() => {
     loadLibraryStats()
   }, [loadLibraryStats, assets.length])
 
@@ -267,18 +312,19 @@ export function LeftSidebar() {
     const onAssetsRefresh = () => {
       loadFolders()
       loadWorkspaceCounts()
+      loadUnorganizedCount()
       loadLibraryStats()
     }
     window.addEventListener('quickasset:refresh-assets', onAssetsRefresh)
     return () => window.removeEventListener('quickasset:refresh-assets', onAssetsRefresh)
-  }, [loadFolders, loadWorkspaceCounts, loadLibraryStats])
+  }, [loadFolders, loadWorkspaceCounts, loadUnorganizedCount, loadLibraryStats])
 
   const handleToggleShortcut = (key: ShortcutKey) => {
     setVisibleShortcuts(prev => ({ ...prev, [key]: !prev[key] }))
   }
 
   const handleResetShortcuts = () => {
-    setVisibleShortcuts({ all: true, unorganized: true, tags: true, trash: true })
+    setVisibleShortcuts({ all: true, unorganized: true, tags: true, similar: true, trash: true })
   }
 
   const renderNavContextMenu = (children: React.ReactNode, key: ShortcutKey) => {
@@ -286,6 +332,7 @@ export function LeftSidebar() {
       { key: 'all', label: '全部文件' },
       { key: 'unorganized', label: '待整理文件' },
       { key: 'tags', label: '全部标签' },
+      { key: 'similar', label: '相似图处理' },
       { key: 'trash', label: '废纸篓' },
     ]
 
@@ -636,14 +683,242 @@ export function LeftSidebar() {
     }
   }
 
+  const refreshRecentLibraries = useCallback(async () => {
+    if (!(window.__TAURI_INTERNALS__ || window.__TAURI__)) return
+    try {
+      const recents = await invoke<RegistryEntry[]>("get_recent_libraries")
+      setRecentLibraries(recents)
+    } catch (e) {
+      console.warn("Failed to refresh recent libraries:", e)
+    }
+  }, [setRecentLibraries])
+
+  useEffect(() => {
+    if (!isSettingsModalOpen) return
+    void refreshRecentLibraries()
+  }, [isSettingsModalOpen, refreshRecentLibraries])
+
+  const openLibraryByPath = useCallback(async (path: string) => {
+    const quickWindow = window as QuickAssetWindow
+    if (!quickWindow.__openLibrary) {
+      alert("当前无法切换素材库，请稍后重试。")
+      return
+    }
+    setIsSettingsBusy(true)
+    try {
+      await quickWindow.__openLibrary(path)
+      await refreshRecentLibraries()
+      setIsSettingsModalOpen(false)
+      setIsMenuOpen(false)
+    } catch (e) {
+      console.error("Failed to open library:", e)
+      alert(`打开素材库失败: ${String(e)}`)
+    } finally {
+      setIsSettingsBusy(false)
+    }
+  }, [refreshRecentLibraries])
+
+  const handlePickLibrary = async () => {
+    if (isSettingsBusy) return
+    try {
+      const path = await open({ directory: true, title: "选择素材库文件夹" })
+      if (!path || typeof path !== "string") return
+      await openLibraryByPath(path)
+    } catch (e) {
+      console.warn("Open library dialog failed:", e)
+    }
+  }
+
+  const handleCreateLibrary = async () => {
+    if (isSettingsBusy) return
+    try {
+      const path = await open({ directory: true, title: "选择新素材库位置" })
+      if (!path || typeof path !== "string") return
+      const inputName = window.prompt("请输入素材库名称", "我的素材库")
+      if (inputName === null) return
+      const name = inputName.trim() || "我的素材库"
+      setIsSettingsBusy(true)
+      await invoke("create_library", { path, name })
+      setIsSettingsBusy(false)
+      await openLibraryByPath(path)
+    } catch (e) {
+      setIsSettingsBusy(false)
+      console.error("Failed to create library:", e)
+      alert(`创建素材库失败: ${String(e)}`)
+    }
+  }
+
+  const handleRebuildThumbnails = async () => {
+    if (isSettingsBusy) return
+    if (!window.confirm("重建缩略图会重新处理当前库中的图片和视频，是否继续？")) return
+    setIsSettingsBusy(true)
+    try {
+      const rebuilt = await invoke<number>("rebuild_all_thumbnails")
+      await loadAssetsFromWindow()
+      window.dispatchEvent(new Event("quickasset:refresh-assets"))
+      alert(`重建完成，共处理 ${rebuilt} 个资源。`)
+    } catch (e) {
+      console.error("Failed to rebuild thumbnails:", e)
+      alert(`重建缩略图失败: ${String(e)}`)
+    } finally {
+      setIsSettingsBusy(false)
+    }
+  }
+
+  const handleRebuildIndex = async () => {
+    if (isSettingsBusy) return
+    if (!window.confirm("重建索引会重新构建搜索与标签索引，是否继续？")) return
+    setIsSettingsBusy(true)
+    try {
+      const indexed = await invoke<number>("rebuild_search_index")
+      window.dispatchEvent(new Event("quickasset:refresh-assets"))
+      alert(`重建索引完成，已处理 ${indexed} 条资源记录。`)
+    } catch (e) {
+      console.error("Failed to rebuild index:", e)
+      alert(`重建索引失败: ${String(e)}`)
+    } finally {
+      setIsSettingsBusy(false)
+    }
+  }
+
   // Library name display
   const libraryName = currentLibrary?.name || "QuickAsset"
+  const settingsModal = isSettingsModalOpen ? (
+    <div
+      className="fixed inset-0 z-[200] flex items-center justify-center bg-black/45 px-4 py-6"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget && !isSettingsBusy) {
+          setIsSettingsModalOpen(false)
+        }
+      }}
+    >
+      <div className="w-full max-w-4xl overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-2xl dark:border-zinc-700 dark:bg-zinc-900">
+        <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+          <div>
+            <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">素材库管理与全局设置</h3>
+            <p className="mt-0.5 text-xs text-zinc-500">统一入口：素材库打开/切换、主题模式、重建缩略图与索引</p>
+          </div>
+          <button
+            type="button"
+            disabled={isSettingsBusy}
+            onClick={() => setIsSettingsModalOpen(false)}
+            className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-zinc-800"
+            title="关闭"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="grid gap-4 p-4 md:grid-cols-2">
+          <section className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+            <h4 className="text-xs font-semibold text-zinc-500">素材库管理</h4>
+            <p className="mt-1 truncate text-xs text-zinc-400">当前库: {currentLibraryPath || "未打开素材库"}</p>
+
+            <div className="mt-3 flex gap-2">
+              <button
+                type="button"
+                disabled={isSettingsBusy}
+                onClick={handlePickLibrary}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-zinc-200 px-2 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                <FolderOpen className="h-3.5 w-3.5" />
+                打开素材库
+              </button>
+              <button
+                type="button"
+                disabled={isSettingsBusy}
+                onClick={handleCreateLibrary}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-zinc-200 px-2 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                新建素材库
+              </button>
+            </div>
+
+            <div className="mt-3 rounded-md border border-zinc-200 dark:border-zinc-800">
+              <div className="px-2 py-1.5 text-[11px] font-medium text-zinc-500">最近素材库（点击切换）</div>
+              {recentLibraries.length === 0 && (
+                <div className="px-2 pb-2 text-xs text-zinc-400">暂无最近素材库</div>
+              )}
+              {recentLibraries.slice(0, 10).map((lib) => {
+                const isCurrent = lib.path === currentLibraryPath
+                return (
+                  <button
+                    key={lib.path}
+                    type="button"
+                    disabled={isSettingsBusy}
+                    onClick={() => void openLibraryByPath(lib.path)}
+                    className="flex w-full items-center justify-between px-2 py-1.5 text-left text-xs text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    title={lib.path}
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate font-medium">{lib.name}</div>
+                      <div className="truncate text-[11px] text-zinc-400">{lib.path}</div>
+                    </div>
+                    {isCurrent && <Check className="h-3.5 w-3.5 shrink-0 text-indigo-500" />}
+                  </button>
+                )
+              })}
+            </div>
+          </section>
+
+          <section className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+            <h4 className="text-xs font-semibold text-zinc-500">全局设置</h4>
+            <p className="mt-1 text-xs text-zinc-400">主题模式与库维护工具</p>
+
+            <div className="mt-3 rounded-md border border-zinc-200 p-2 dark:border-zinc-800">
+              <p className="text-[11px] text-zinc-500">主题模式</p>
+              <div className="mt-1 flex gap-1">
+                {themeOptions.map((option) => (
+                  <button
+                    key={option.mode}
+                    type="button"
+                    onClick={() => setThemeMode(option.mode)}
+                    className={`flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
+                      themeMode === option.mode
+                        ? "bg-indigo-500 text-white"
+                        : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                    }`}
+                  >
+                    {option.icon}
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-3 flex gap-2">
+              <button
+                type="button"
+                disabled={isSettingsBusy}
+                onClick={handleRebuildThumbnails}
+                className="flex flex-1 items-center justify-center gap-1 rounded-md border border-zinc-200 px-2 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${isSettingsBusy ? "animate-spin" : ""}`} />
+                重建缩略图
+              </button>
+              <button
+                type="button"
+                disabled={isSettingsBusy}
+                onClick={handleRebuildIndex}
+                className="flex flex-1 items-center justify-center gap-1 rounded-md border border-zinc-200 px-2 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${isSettingsBusy ? "animate-spin" : ""}`} />
+                重建索引
+              </button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  ) : null
 
   return (
-    <aside className={isMobile
-      ? "fixed inset-y-0 left-0 z-40 flex h-full w-[min(18rem,calc(100vw-1rem))] shrink-0 flex-col border-r border-zinc-200 bg-[#fafafa] shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
-      : "static z-0 flex h-full w-56 shrink-0 flex-col border-r border-zinc-200 bg-[#fafafa] dark:border-zinc-800 dark:bg-zinc-950"
-    }>
+    <>
+      <aside className={isMobile
+        ? "fixed inset-y-0 left-0 z-40 flex h-full w-[min(18rem,calc(100vw-1rem))] shrink-0 flex-col border-r border-zinc-200 bg-[#fafafa] shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+        : "static flex h-full w-56 shrink-0 flex-col border-r border-zinc-200 bg-[#fafafa] dark:border-zinc-800 dark:bg-zinc-950"
+      }>
       {/* Top Header */}
       <div className="flex items-center gap-4 px-4 py-4 relative">
         <div ref={menuRef}>
@@ -655,7 +930,7 @@ export function LeftSidebar() {
           </button>
 
           {isMenuOpen && (
-            <div className="absolute top-12 left-4 w-48 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-md shadow-lg z-50 py-1">
+            <div className="absolute top-12 left-4 w-56 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-md shadow-lg z-50 py-1">
               <button
                 onClick={handleImport}
                 className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center gap-2"
@@ -671,8 +946,15 @@ export function LeftSidebar() {
                 清理失效资产
               </button>
               <div className="h-px bg-zinc-200 dark:bg-zinc-800 my-1" />
-              <button className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800">
-                全局设置
+              <button
+                onClick={() => {
+                  setIsMenuOpen(false)
+                  setIsSettingsModalOpen(true)
+                }}
+                className="w-full text-left px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center gap-2"
+              >
+                <Settings2 className="w-4 h-4" />
+                素材库管理与全局设置
               </button>
             </div>
           )}
@@ -715,12 +997,16 @@ export function LeftSidebar() {
             'all'
           )}
           {visibleShortcuts.unorganized && renderNavContextMenu(
-            <NavItem id="nav-unorganized" icon={<CheckSquare />} label="待整理文件" count={0} active={!isFolderPreviewMode && activeView === 'unorganized'} onClick={() => selectSidebarView('unorganized')} />,
+            <NavItem id="nav-unorganized" icon={<CheckSquare />} label="待整理文件" count={unorganizedCount} active={!isFolderPreviewMode && activeView === 'unorganized'} onClick={() => selectSidebarView('unorganized')} />,
             'unorganized'
           )}
           {visibleShortcuts.tags && renderNavContextMenu(
             <NavItem id="nav-tags" icon={<Tags />} label="全部标签" active={!isFolderPreviewMode && activeView === 'tags'} onClick={() => selectSidebarView('tags')} />,
             'tags'
+          )}
+          {visibleShortcuts.similar && renderNavContextMenu(
+            <NavItem id="nav-similar" icon={<Sparkles />} label="相似图处理" active={!isFolderPreviewMode && activeView === 'similar'} onClick={() => selectSidebarView('similar')} />,
+            'similar'
           )}
           {visibleShortcuts.trash && renderNavContextMenu(
             <NavItem id="nav-trash" icon={<Trash2 />} label="废纸篓" count={libraryStats.trashed_count} active={!isFolderPreviewMode && activeView === 'trash'} onClick={() => selectSidebarView('trash')} />,
@@ -839,7 +1125,10 @@ export function LeftSidebar() {
           <Plus className="w-5 h-5" />
         </button>
       </div>
-    </aside>
+
+      </aside>
+      {settingsModal ? createPortal(settingsModal, document.body) : null}
+    </>
   )
 }
 

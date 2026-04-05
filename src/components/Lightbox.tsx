@@ -9,6 +9,9 @@ import { getViewerType } from "@/components/viewers/getViewerType"
 const ImageViewer = lazy(() =>
   import("@/components/viewers/ImageViewer").then((m) => ({ default: m.ImageViewer }))
 )
+const GifViewer = lazy(() =>
+  import("@/components/viewers/GifViewer").then((m) => ({ default: m.GifViewer }))
+)
 const PdfViewer = lazy(() =>
   import("@/components/viewers/PdfViewer").then((m) => ({ default: m.PdfViewer }))
 )
@@ -217,11 +220,24 @@ export function Lightbox() {
   const currentIndex = assets.findIndex(a => a.id === previewAsset.id)
   const zoomPercent = Math.round(displayScale * 100)
   const previewExt = getFileExt(previewAsset.name)
+  const isGifViewer = viewerType === 'image' && previewExt === 'gif'
   const shouldPreferThumbnail = THUMBNAIL_FIRST_EXTENSIONS.has(previewExt) && !fullPreviewPath
 
   const renderViewer = () => {
     switch (viewerType) {
       case 'image':
+        if (isGifViewer) {
+          return (
+            <GifViewer
+              filePath={previewAsset.path}
+              zoom={zoom}
+              onZoomChange={setZoom}
+              onDisplayScaleChange={(scale) => {
+                setDisplayScale(prev => (Math.abs(prev - scale) < 0.001 ? prev : scale))
+              }}
+            />
+          )
+        }
         return (
           <ImageViewer
             filePath={fullPreviewPath || previewAsset.path}
@@ -338,7 +354,7 @@ export function Lightbox() {
         {/* Bottom hint */}
         {isImageViewer && zoom <= 1 && (
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/30 text-xs">
-            滚轮缩放 · 方向键切换 · ESC 关闭
+            {isGifViewer ? "滚轮缩放 · 底部可切换 GIF 播放模式 · ESC 关闭" : "滚轮缩放 · 方向键切换 · ESC 关闭"}
           </div>
         )}
         {!isImageViewer && (

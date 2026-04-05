@@ -2,8 +2,10 @@ import { useEffect, useState, useRef, lazy, Suspense, useCallback } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import { MainLayout } from "@/components/layout/MainLayout"
+import { WindowTitleBar } from "@/components/layout/WindowTitleBar"
 import { AssetsPage } from "@/pages/AssetsPage"
 import { useAssetStore, type LibraryConfig, type RegistryEntry } from "@/store/useAssetStore"
+import { useTheme } from "@/hooks/useTheme"
 
 const RightSidebar = lazy(() =>
   import("@/components/layout/RightSidebar").then((m) => ({ default: m.RightSidebar }))
@@ -13,6 +15,9 @@ const Lightbox = lazy(() =>
 )
 const WelcomePage = lazy(() =>
   import("@/pages/WelcomePage").then((m) => ({ default: m.WelcomePage }))
+)
+const SimilarDedupePage = lazy(() =>
+  import("@/pages/SimilarDedupePage").then((m) => ({ default: m.SimilarDedupePage }))
 )
 
 type AppWindow = Window & {
@@ -29,6 +34,8 @@ const hasTauriRuntime = () => {
 }
 
 function App() {
+  useTheme()
+
   const currentLibrary = useAssetStore((s) => s.currentLibrary)
   const isLoadingLibrary = useAssetStore((s) => s.isLoadingLibrary)
   const setCurrentLibrary = useAssetStore((s) => s.setCurrentLibrary)
@@ -36,6 +43,7 @@ function App() {
   const setIsLoadingLibrary = useAssetStore((s) => s.setIsLoadingLibrary)
   const resetForNewLibrary = useAssetStore((s) => s.resetForNewLibrary)
   const isRightSidebarVisible = useAssetStore((s) => s.isRightSidebarVisible)
+  const activeView = useAssetStore((s) => s.activeView)
 
   const [isInitialized, setIsInitialized] = useState(false)
   const [migrateProgress, setMigrateProgress] = useState<{ migrated: number; total: number } | null>(null)
@@ -78,6 +86,12 @@ function App() {
     try {
       const config = await invoke<LibraryConfig>('open_library_cmd', { path })
       setCurrentLibrary(config, path)
+      try {
+        const recents = await invoke<RegistryEntry[]>('get_recent_libraries')
+        setRecentLibraries(recents)
+      } catch (e) {
+        console.warn('Failed to refresh recent libraries:', e)
+      }
 
       // Start file watcher for this library
       try {
@@ -93,7 +107,7 @@ function App() {
       console.error('Failed to open library:', e)
     }
     setIsLoadingLibrary(false)
-  }, [resetForNewLibrary, runHashMigrationIfNeeded, runThumbnailRepairIfNeeded, setCurrentLibrary, setIsLoadingLibrary])
+  }, [resetForNewLibrary, runHashMigrationIfNeeded, runThumbnailRepairIfNeeded, setCurrentLibrary, setIsLoadingLibrary, setRecentLibraries])
 
   const initApp = useCallback(async () => {
     if (!hasTauriRuntime()) {
@@ -229,8 +243,11 @@ function App() {
   // Loading state
   if (isLoadingLibrary) {
     return (
-      <div className="flex items-center justify-center h-screen bg-zinc-50 dark:bg-zinc-950">
-        <div className="text-zinc-500">正在加载素材库...</div>
+      <div className="flex h-screen flex-col bg-zinc-50 dark:bg-zinc-950">
+        <WindowTitleBar />
+        <div className="flex flex-1 items-center justify-center">
+          <div className="text-zinc-500">正在加载素材库...</div>
+        </div>
       </div>
     )
   }
@@ -238,9 +255,14 @@ function App() {
   // If no library and initialized, show welcome
   if (isInitialized && !currentLibrary && hasTauriRuntime()) {
     return (
-      <Suspense fallback={<div className="flex items-center justify-center h-screen text-zinc-500">正在加载...</div>}>
-        <WelcomePage onOpenLibrary={openLibrary} />
-      </Suspense>
+      <div className="flex h-screen flex-col overflow-hidden bg-zinc-50 dark:bg-zinc-950">
+        <WindowTitleBar />
+        <div className="flex-1 overflow-hidden">
+          <Suspense fallback={<div className="flex h-full items-center justify-center text-zinc-500">正在加载...</div>}>
+            <WelcomePage onOpenLibrary={openLibrary} />
+          </Suspense>
+        </div>
+      </div>
     )
   }
 
@@ -249,12 +271,14 @@ function App() {
     <MainLayout>
       <div className="flex flex-1 overflow-hidden">
         <main className="relative flex-1 flex flex-col min-w-0 overflow-hidden bg-white dark:bg-[#121212]">
-          <AssetsPage />
+          <Suspense fallback={<div className="flex h-full items-center justify-center text-zinc-500">正在加载...</div>}>
+            {activeView === 'similar' ? <SimilarDedupePage /> : <AssetsPage />}
+          </Suspense>
           <Suspense fallback={null}>
             <Lightbox />
           </Suspense>
         </main>
-        {isRightSidebarVisible && (
+        {isRightSidebarVisible && activeView !== 'similar' && (
           <Suspense fallback={null}>
             <RightSidebar />
           </Suspense>

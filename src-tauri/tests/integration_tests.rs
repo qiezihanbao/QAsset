@@ -124,3 +124,59 @@ fn test_health_check_logic() {
     assert_eq!(missing_ids[0], "missing1");
 }
 
+#[test]
+fn test_delete_asset_with_fts_triggers() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test_library.db");
+    db::init_library_db(&db_path).unwrap();
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+
+    conn.execute(
+        "INSERT INTO assets (id, name, path, relative_path, asset_type, size)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            "to-delete",
+            "to-delete.png",
+            "/fake/path/to-delete.png",
+            "to-delete.png",
+            "image",
+            1
+        ],
+    )
+    .unwrap();
+
+    let fts_before: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM assets_fts WHERE asset_id = ?1",
+            rusqlite::params!["to-delete"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(fts_before, 1);
+
+    conn.execute(
+        "DELETE FROM assets WHERE id = ?1",
+        rusqlite::params!["to-delete"],
+    )
+    .unwrap();
+
+    let assets_after: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM assets WHERE id = ?1",
+            rusqlite::params!["to-delete"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let fts_after: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM assets_fts WHERE asset_id = ?1",
+            rusqlite::params!["to-delete"],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(assets_after, 0);
+    assert_eq!(fts_after, 0);
+}
+

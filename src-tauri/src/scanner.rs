@@ -5,11 +5,13 @@ use flate2::read::ZlibDecoder;
 use image::GenericImageView;
 use rayon::prelude::*;
 use rusqlite::Connection;
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use tauri::{Emitter, AppHandle};
@@ -196,7 +198,7 @@ pub fn open_image_for_processing(abs_path: &Path) -> Result<image::DynamicImage,
         .unwrap_or_default();
 
     match ext.as_str() {
-        "psd" | "psb" => open_psd_composite_image(abs_path),
+        "psd" | "psb" => open_psd_if_enabled(abs_path),
         "clip" => open_clip_image(abs_path, ClipDecodeMode::PreviewFast),
         _ => image::open(abs_path)
             .map_err(|e| format!("Failed to open image '{}': {}", abs_path.display(), e)),
@@ -215,30 +217,128 @@ pub fn open_image_for_full_preview(abs_path: &Path) -> Result<image::DynamicImag
         .unwrap_or_default();
 
     match ext.as_str() {
-        "psd" | "psb" => open_psd_composite_image(abs_path),
+        "psd" | "psb" => open_psd_if_enabled(abs_path),
         "clip" => open_clip_image(abs_path, ClipDecodeMode::BestQuality),
         _ => image::open(abs_path)
             .map_err(|e| format!("Failed to open image '{}': {}", abs_path.display(), e)),
     }
 }
 
+fn psd_decode_enabled() -> bool {
+    matches!(
+        std::env::var("QUICKASSET_ENABLE_PSD_DECODE").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("on") | Some("ON")
+    )
+}
+
+fn open_psd_if_enabled(abs_path: &Path) -> Result<image::DynamicImage, String> {
+    if !psd_decode_enabled() {
+        return Err(format!(
+            "Skipping PSD/PSB decode for stability: '{}'",
+            abs_path.display()
+        ));
+    }
+    open_psd_composite_image(abs_path)
+}
+
 fn open_psd_composite_image(abs_path: &Path) -> Result<image::DynamicImage, String> {
     let bytes = fs::read(abs_path)
         .map_err(|e| format!("Failed to read PSD '{}': {}", abs_path.display(), e))?;
-    let psd = psd::Psd::from_bytes(&bytes)
-        .map_err(|e| format!("Failed to parse PSD '{}': {:?}", abs_path.display(), e))?;
+    validate_psd_basic_structure(abs_path, &bytes)?;
+    let decoded = catch_unwind(AssertUnwindSafe(|| {
+        let psd = psd::Psd::from_bytes(&bytes)
+            .map_err(|e| format!("Failed to parse PSD '{}': {:?}", abs_path.display(), e))?;
 
-    let width = psd.width();
-    let height = psd.height();
-    let rgba = psd.rgba();
-    let rgba_img = image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| {
-        format!(
-            "PSD composite image buffer size mismatch for '{}'",
+        let width = psd.width();
+        let height = psd.height();
+        let rgba = psd.rgba();
+        let rgba_img = image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| {
+            format!(
+                "PSD composite image buffer size mismatch for '{}'",
+                abs_path.display()
+            )
+        })?;
+
+        Ok::<image::DynamicImage, String>(image::DynamicImage::ImageRgba8(rgba_img))
+    }));
+
+    match decoded {
+        Ok(result) => result,
+        Err(payload) => Err(format!(
+            "PSD decoder panicked for '{}': {}",
+            abs_path.display(),
+            panic_payload_to_string(payload)
+        )),
+    }
+}
+
+fn read_be_u16_at(bytes: &[u8], offset: usize) -> Option<u16> {
+    let chunk = bytes.get(offset..offset.saturating_add(2))?;
+    Some(u16::from_be_bytes([chunk[0], chunk[1]]))
+}
+
+fn read_be_u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
+    let chunk = bytes.get(offset..offset.saturating_add(4))?;
+    Some(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+}
+
+fn validate_psd_basic_structure(abs_path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() < 30 {
+        return Err(format!(
+            "PSD '{}' is too small ({} bytes)",
+            abs_path.display(),
+            bytes.len()
+        ));
+    }
+
+    if bytes.get(0..4) != Some(b"8BPS") {
+        return Err(format!("Invalid PSD signature for '{}'", abs_path.display()));
+    }
+
+    let version = read_be_u16_at(bytes, 4)
+        .ok_or_else(|| format!("Failed to read PSD version from '{}'", abs_path.display()))?;
+    if version != 1 {
+        return Err(format!(
+            "Unsupported PSD version {} for '{}' (PSB not supported by current decoder)",
+            version,
             abs_path.display()
-        )
-    })?;
+        ));
+    }
 
-    Ok(image::DynamicImage::ImageRgba8(rgba_img))
+    // Basic section boundary checks for classic PSD (version 1):
+    // header(26) + color data len(4) + image resources len(4) + layer/mask len(4)
+    let mut cursor: usize = 26;
+    for section_name in ["color mode", "image resources", "layer/mask"] {
+        let section_len = read_be_u32_at(bytes, cursor)
+            .ok_or_else(|| format!("Failed to read {} length in '{}'", section_name, abs_path.display()))?
+            as usize;
+        cursor = cursor
+            .checked_add(4)
+            .ok_or_else(|| format!("Invalid {} length in '{}'", section_name, abs_path.display()))?;
+        let section_end = cursor
+            .checked_add(section_len)
+            .ok_or_else(|| format!("Invalid {} length in '{}'", section_name, abs_path.display()))?;
+        if section_end > bytes.len() {
+            return Err(format!(
+                "Corrupted PSD '{}': {} section exceeds file bounds",
+                abs_path.display(),
+                section_name
+            ));
+        }
+        cursor = section_end;
+    }
+
+    Ok(())
+}
+
+fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
+    if let Some(msg) = payload.downcast_ref::<&str>() {
+        return (*msg).to_string();
+    }
+    if let Some(msg) = payload.downcast_ref::<String>() {
+        return msg.clone();
+    }
+    "unknown panic payload".to_string()
 }
 
 #[derive(Clone, Copy)]
@@ -1361,12 +1461,35 @@ pub fn scan_library(
 
     report.deleted = deleted_ids.len() as u32;
 
-    // Delete removed thumbnails upfront. DB delete is batched in one transaction below.
+    // Delete removed thumbnails and DB rows upfront so UI can drop stale assets early.
     for id in &deleted_ids {
         if let Some(rel) = db_assets.get(id) {
             let thumb_path = thumbnails::thumbnail_abs_path(library_root, &rel.relative_path);
             let _ = fs::remove_file(&thumb_path);
         }
+    }
+    if !deleted_ids.is_empty() {
+        let delete_tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Delete transaction begin failed: {}", e))?;
+        {
+            let mut delete_stmt = delete_tx
+                .prepare("DELETE FROM assets WHERE id = ?1")
+                .map_err(|e| format!("Prepare delete failed: {}", e))?;
+
+            for id in &deleted_ids {
+                if let Err(e) = delete_stmt.execute(rusqlite::params![id]) {
+                    report.errors.push(ScanError {
+                        path: id.clone(),
+                        message: format!("DB delete failed: {}", e),
+                    });
+                }
+            }
+        }
+
+        delete_tx
+            .commit()
+            .map_err(|e| format!("Delete transaction commit failed: {}", e))?;
     }
 
     let files_to_process: Vec<&DiscoveredFile> = new_files.iter().copied().chain(changed_files.iter().copied()).collect();
@@ -1434,15 +1557,6 @@ pub fn scan_library(
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("Transaction begin failed: {}", e))?;
-
-    for id in &deleted_ids {
-        if let Err(e) = tx.execute("DELETE FROM assets WHERE id = ?1", rusqlite::params![id]) {
-            report.errors.push(ScanError {
-                path: id.clone(),
-                message: format!("DB delete failed: {}", e),
-            });
-        }
-    }
 
     {
         let mut insert_stmt = tx

@@ -105,3 +105,43 @@ pub struct ScanError {
     pub path: String,
     pub message: String,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SimilarAssetItem {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub relative_path: String,
+    pub size: u64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub created_at: u64,
+    pub modified_at: u64,
+    pub rating: Option<u8>,
+    pub thumbnail_path: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SimilarGroup {
+    pub group_id: String,
+    pub members: Vec<SimilarAssetItem>,
+    pub suggested_keep_id: String,
+    pub suggested_delete_ids: Vec<String>,
+    pub reclaimable_size: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SimilarGroupsResult {
+    pub threshold: u32,
+    pub total_images_scanned: u32,
+    pub groups_count: u32,
+    pub duplicate_assets_count: u32,
+    pub reclaimable_size: u64,
+    pub groups: Vec<SimilarGroup>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SimilarApplyResult {
+    pub deleted_count: u32,
+    pub failed_ids: Vec<String>,
+}

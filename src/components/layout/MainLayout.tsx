@@ -2,6 +2,7 @@ import React, { useEffect } from "react"
 import { useAssetStore } from "@/store/useAssetStore"
 import { useShallow } from "zustand/react/shallow"
 import { LeftSidebar } from "./LeftSidebar"
+import { WindowTitleBar } from "./WindowTitleBar"
 import { isMobile } from "@/lib/utils"
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
@@ -34,26 +35,29 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
   }, [setLeftSidebarVisible, setRightSidebarVisible])
 
   return (
-    <div className="relative flex h-dvh w-full min-w-0 overflow-hidden bg-white text-zinc-950 dark:bg-zinc-950 dark:text-zinc-50">
+    <div className="relative flex h-dvh w-full min-w-0 flex-col overflow-hidden bg-white text-zinc-950 dark:bg-zinc-950 dark:text-zinc-50">
       <button id="global-left-sidebar-btn" className="hidden" onClick={toggleLeftSidebar} />
       <button id="global-right-sidebar-btn" className="hidden" onClick={toggleRightSidebar} />
+      <WindowTitleBar />
 
-      {/* Mobile overlay - only on mobile platforms */}
-      {isMobile && (isLeftSidebarVisible || isRightSidebarVisible) && (
-        <button
-          aria-label="关闭侧边栏"
-          className="fixed inset-0 z-30 bg-black/40 backdrop-blur-[1px]"
-          onClick={() => {
-            setLeftSidebarVisible(false)
-            setRightSidebarVisible(false)
-          }}
-        />
-      )}
+      <div className="relative flex min-w-0 flex-1 overflow-hidden">
+        {/* Mobile overlay - only on mobile platforms */}
+        {isMobile && (isLeftSidebarVisible || isRightSidebarVisible) && (
+          <button
+            aria-label="关闭侧边栏"
+            className="fixed inset-0 z-30 bg-black/40 backdrop-blur-[1px]"
+            onClick={() => {
+              setLeftSidebarVisible(false)
+              setRightSidebarVisible(false)
+            }}
+          />
+        )}
 
-      {isLeftSidebarVisible && <LeftSidebar />}
-      <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-zinc-50/50 dark:bg-zinc-900/50">
-        {children}
-      </main>
+        {isLeftSidebarVisible && <LeftSidebar />}
+        <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-zinc-50/50 dark:bg-zinc-900/50">
+          {children}
+        </main>
+      </div>
     </div>
   )
 }

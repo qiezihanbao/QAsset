@@ -1,4 +1,4 @@
-import { Image as ImageIcon, FileText, Video, Box, ChevronLeft, ChevronRight, Filter, Grid, Search, ChevronDown, Columns, FolderOpen, Folder, Trash2, Copy, Edit2, MoveRight, PlusCircle, Tag, Image, Link, Star, HardDrive, Maximize2 } from "lucide-react"
+import { Image as ImageIcon, FileText, Video, Box, ChevronLeft, ChevronRight, Filter, Grid, Search, ChevronDown, Columns, FolderOpen, Folder, Trash2, Copy, Edit2, MoveRight, PlusCircle, Tag, Image, Link, Star, HardDrive, Maximize2, Ruler } from "lucide-react"
 import { useAssetStore, AssetLite, AssetFilters, type AssetDetail, type Workspace, type ViewType } from "@/store/useAssetStore"
 import * as ContextMenu from '@radix-ui/react-context-menu'
 import { invoke } from "@tauri-apps/api/core"
@@ -43,6 +43,15 @@ const SEARCH_DEBOUNCE_MS = 250
 const INCREMENTAL_PAGE_SIZE = 300
 const FULL_FETCH_PAGE_SIZE = 10000
 const LOAD_MORE_THRESHOLD_PX = 900
+const CUSTOM_SORT_FALLBACK_RANK = Number.MAX_SAFE_INTEGER
+
+function hashStringWithSeed(input: string, seed: number): number {
+  let hash = seed | 0
+  for (let i = 0; i < input.length; i += 1) {
+    hash = ((hash << 5) - hash + input.charCodeAt(i)) | 0
+  }
+  return hash >>> 0
+}
 
 interface QueryAssetsResult {
   total_count: number
@@ -472,9 +481,19 @@ export function AssetsPage() {
   const [isTagFilterOpen, setIsTagFilterOpen] = useState(false)
   const [isTypeFilterOpen, setIsTypeFilterOpen] = useState(false)
   const [isSizeFilterOpen, setIsSizeFilterOpen] = useState(false)
+  const [isDimensionFilterOpen, setIsDimensionFilterOpen] = useState(false)
   const [isRatingFilterOpen, setIsRatingFilterOpen] = useState(false)
   const [isShapeFilterOpen, setIsShapeFilterOpen] = useState(false)
   const [isSortOpen, setIsSortOpen] = useState(false)
+  const [isFilterBarVisible, setIsFilterBarVisible] = useState(true)
+  const [randomSortSeed, setRandomSortSeed] = useState(() => Date.now())
+  const [customSortOrderMap, setCustomSortOrderMap] = useState<Record<string, number>>({})
+  const [dimensionFilter, setDimensionFilter] = useState({
+    widthMin: '',
+    widthMax: '',
+    heightMin: '',
+    heightMax: '',
+  })
   const [folders, setFolders] = useState<FolderInfo[]>([])
   const [refreshVersion, setRefreshVersion] = useState(0)
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState(searchQuery)
@@ -521,7 +540,18 @@ export function AssetsPage() {
     if (!el) return
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        setContainerWidth(entry.contentRect.width)
+        const nextWidth = Math.round(entry.contentRect.width)
+        if (nextWidth > 1) {
+          setContainerWidth(nextWidth)
+          continue
+        }
+
+        // Guard against transient zero-width reports (can happen after blocking dialogs
+        // or heavy UI updates) which would force the grid into a single-column layout.
+        const fallback = parentRef.current?.clientWidth ?? 0
+        if (fallback > 1) {
+          setContainerWidth(fallback)
+        }
       }
     })
     observer.observe(el)
@@ -635,6 +665,20 @@ export function AssetsPage() {
     if (newTags.length === 0) return
 
     try {
+      const targetIds = (selectedAssets.length > 1 && selectedAssets.includes(id)) ? selectedAssets : [id]
+      if (targetIds.length > 1) {
+        await safeInvoke("batch_update_asset_tags", {
+          ids: targetIds,
+          addTags: newTags,
+          add_tags: newTags,
+          removeTags: [],
+          remove_tags: [],
+        })
+        useAssetStore.getState().refreshTagsSummary()
+        triggerRefresh()
+        return
+      }
+
       const detail = await safeInvoke<AssetDetail>("get_asset_detail", { id })
       const existingTags = detail?.tags
         ? (() => {
@@ -664,6 +708,28 @@ export function AssetsPage() {
     }
   }
 
+  const handleAssignWorkspace = async (assetId: string, workspaceId: string) => {
+    const targetIds = (selectedAssets.length > 1 && selectedAssets.includes(assetId)) ? selectedAssets : [assetId]
+    if (targetIds.length > 1) {
+      await safeInvoke("batch_update_asset_workspaces", {
+        ids: targetIds,
+        addWorkspaceIds: [workspaceId],
+        add_workspace_ids: [workspaceId],
+        removeWorkspaceIds: [],
+        remove_workspace_ids: [],
+      })
+      triggerRefresh()
+      return
+    }
+
+    await safeInvoke("update_asset", {
+      id: assetId,
+      workspaceIds: JSON.stringify([workspaceId]),
+      workspace_ids: JSON.stringify([workspaceId]),
+    })
+    triggerRefresh()
+  }
+
   const allTags = useMemo(
     () => Object.keys(tagsSummary).sort((a, b) => (tagsSummary[b] || 0) - (tagsSummary[a] || 0)),
     [tagsSummary]
@@ -681,12 +747,33 @@ export function AssetsPage() {
     : "全部文件"
   const isCanvasEnabled = activeView === 'workspace'
   const currentFolderPath = folderFilter && folderFilter.length > 0 ? folderFilter[0] : null
+  const parseDimensionInput = (value: string): number | null => {
+    const trimmed = value.trim()
+    if (!trimmed) return null
+    const parsed = Number(trimmed)
+    if (!Number.isFinite(parsed) || parsed < 0) return null
+    return parsed
+  }
+  const dimensionBounds = {
+    widthMin: parseDimensionInput(dimensionFilter.widthMin),
+    widthMax: parseDimensionInput(dimensionFilter.widthMax),
+    heightMin: parseDimensionInput(dimensionFilter.heightMin),
+    heightMax: parseDimensionInput(dimensionFilter.heightMax),
+  }
+  const hasDimensionFilter =
+    dimensionBounds.widthMin !== null ||
+    dimensionBounds.widthMax !== null ||
+    dimensionBounds.heightMin !== null ||
+    dimensionBounds.heightMax !== null
   const hasClientOnlyFilters =
     !!similarAssetIds ||
     !!colorFilter ||
     !!(sizeFilter && sizeFilter.length > 0) ||
     !!(ratingFilter && ratingFilter.length > 0) ||
-    !!(shapeFilter && shapeFilter.length > 0)
+    !!(shapeFilter && shapeFilter.length > 0) ||
+    hasDimensionFilter ||
+    sortConfig.field === 'random' ||
+    sortConfig.field === 'custom'
   const similarAssetIdSet = useMemo(
     () => (similarAssetIds ? new Set(similarAssetIds) : null),
     [similarAssetIds]
@@ -748,8 +835,11 @@ export function AssetsPage() {
 
   const queryFilters = useMemo((): Partial<AssetFilters> => {
     const hasFolderPreview = !!(folderFilter && folderFilter.length > 0)
+    const backendSortField = (sortConfig.field === 'random' || sortConfig.field === 'custom')
+      ? 'created_at'
+      : sortConfig.field
     const filters: Partial<AssetFilters> = {
-      sort_field: sortConfig.field,
+      sort_field: backendSortField,
       sort_order: sortConfig.order,
       is_trashed: hasFolderPreview ? false : activeView === 'trash' ? true : false,
     }
@@ -901,7 +991,7 @@ export function AssetsPage() {
       return assets
     }
 
-    return assets.filter(asset => {
+    const baseFiltered = assets.filter(asset => {
       // Similar Search filter (highest priority if active)
       if (similarAssetIdSet) {
         return similarAssetIdSet.has(asset.id);
@@ -954,14 +1044,77 @@ export function AssetsPage() {
         }
       }
 
-      return matchesColor && matchesSize && matchesRating && matchesShape
+      // Dimension axis filter (not handled by backend)
+      let matchesDimensions = true
+      if (hasDimensionFilter) {
+        if (!asset.width || !asset.height) {
+          matchesDimensions = false
+        } else {
+          if (dimensionBounds.widthMin !== null && asset.width < dimensionBounds.widthMin) matchesDimensions = false
+          if (dimensionBounds.widthMax !== null && asset.width > dimensionBounds.widthMax) matchesDimensions = false
+          if (dimensionBounds.heightMin !== null && asset.height < dimensionBounds.heightMin) matchesDimensions = false
+          if (dimensionBounds.heightMax !== null && asset.height > dimensionBounds.heightMax) matchesDimensions = false
+        }
+      }
+
+      return matchesColor && matchesSize && matchesRating && matchesShape && matchesDimensions
     })
-  }, [assets, hasClientOnlyFilters, similarAssetIdSet, colorFilter, sizeFilter, ratingFilter, shapeFilter])
+    if (sortConfig.field === 'random') {
+      return [...baseFiltered].sort((a, b) => {
+        const ha = hashStringWithSeed(a.id, randomSortSeed)
+        const hb = hashStringWithSeed(b.id, randomSortSeed)
+        if (ha !== hb) return ha - hb
+        return a.id.localeCompare(b.id)
+      })
+    }
+    if (sortConfig.field === 'custom') {
+      return [...baseFiltered].sort((a, b) => {
+        const rankA = customSortOrderMap[a.id] ?? CUSTOM_SORT_FALLBACK_RANK
+        const rankB = customSortOrderMap[b.id] ?? CUSTOM_SORT_FALLBACK_RANK
+        if (rankA !== rankB) return rankA - rankB
+        return b.created_at - a.created_at
+      })
+    }
+
+    return baseFiltered
+  }, [
+    assets,
+    hasClientOnlyFilters,
+    similarAssetIdSet,
+    colorFilter,
+    sizeFilter,
+    ratingFilter,
+    shapeFilter,
+    hasDimensionFilter,
+    dimensionBounds.widthMin,
+    dimensionBounds.widthMax,
+    dimensionBounds.heightMin,
+    dimensionBounds.heightMax,
+    sortConfig.field,
+    randomSortSeed,
+    customSortOrderMap,
+  ])
+
+  const applyCustomSort = useCallback(() => {
+    const source = filteredAssets.length > 0 ? filteredAssets : assets
+    const nextOrder: Record<string, number> = {}
+    source.forEach((asset, index) => {
+      nextOrder[asset.id] = index
+    })
+    setCustomSortOrderMap(nextOrder)
+    setSortConfig({ field: 'custom', order: 'asc' })
+  }, [assets, filteredAssets, setSortConfig])
+
+  const applyRandomSort = useCallback(() => {
+    setRandomSortSeed(Date.now())
+    setSortConfig({ field: 'random', order: 'asc' })
+  }, [setSortConfig])
 
   // Grid: use CSS flexbox wrap with fixed item width for stable layout
   const gap = 24
   const columnCount = useMemo(() => {
-    return Math.max(1, Math.floor((containerWidth + gap) / (thumbnailSize + gap)))
+    const safeWidth = containerWidth > 1 ? containerWidth : (parentRef.current?.clientWidth || 1000)
+    return Math.max(1, Math.floor((safeWidth + gap) / (thumbnailSize + gap)))
   }, [containerWidth, thumbnailSize])
 
   const rowCount = useMemo(() => {
@@ -1068,17 +1221,24 @@ export function AssetsPage() {
               排序 <ChevronDown className="w-3 h-3" />
             </button>
             {isSortOpen && (
-              <div className="absolute top-full right-0 mt-1 flex flex-col bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg z-20 py-1 min-w-[120px]">
+              <div className="absolute top-full right-0 mt-1 flex flex-col bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg z-[80] py-1 min-w-[140px]">
                 <button onClick={() => { setSortConfig({ field: 'created_at', order: 'desc' }); setIsSortOpen(false) }} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'created_at' && sortConfig.order === 'desc' ? 'text-indigo-500' : ''}`}>最新添加</button>
                 <button onClick={() => { setSortConfig({ field: 'created_at', order: 'asc' }); setIsSortOpen(false) }} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'created_at' && sortConfig.order === 'asc' ? 'text-indigo-500' : ''}`}>最早添加</button>
                 <button onClick={() => { setSortConfig({ field: 'size', order: 'desc' }); setIsSortOpen(false) }} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'size' && sortConfig.order === 'desc' ? 'text-indigo-500' : ''}`}>文件最大</button>
                 <button onClick={() => { setSortConfig({ field: 'size', order: 'asc' }); setIsSortOpen(false) }} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'size' && sortConfig.order === 'asc' ? 'text-indigo-500' : ''}`}>文件最小</button>
                 <button onClick={() => { setSortConfig({ field: 'name', order: 'asc' }); setIsSortOpen(false) }} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'name' && sortConfig.order === 'asc' ? 'text-indigo-500' : ''}`}>名称 A-Z</button>
                 <button onClick={() => { setSortConfig({ field: 'rating', order: 'desc' }); setIsSortOpen(false) }} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'rating' && sortConfig.order === 'desc' ? 'text-indigo-500' : ''}`}>评分最高</button>
+                <div className="h-px bg-zinc-200 dark:bg-zinc-800 my-1" />
+                <button onClick={() => { applyCustomSort(); setIsSortOpen(false) }} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'custom' ? 'text-indigo-500' : ''}`}>自定义排序</button>
+                <button onClick={() => { applyRandomSort(); setIsSortOpen(false) }} className={`px-3 py-1.5 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${sortConfig.field === 'random' ? 'text-indigo-500' : ''}`}>随机排序</button>
               </div>
             )}
           </div>
-          <button className="p-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition-colors shrink-0">
+          <button
+            onClick={() => setIsFilterBarVisible(v => !v)}
+            className={`p-1.5 rounded transition-colors shrink-0 ${isFilterBarVisible ? 'bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-200' : 'hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500'}`}
+            title={isFilterBarVisible ? "隐藏筛选栏" : "显示筛选栏"}
+          >
             <Filter className="w-4 h-4" />
           </button>
           <div className="flex items-center bg-zinc-100 dark:bg-zinc-800 rounded p-0.5 mx-1 shrink-0">
@@ -1128,6 +1288,7 @@ export function AssetsPage() {
       </div>
 
       {/* Filter Bar */}
+      {isFilterBarVisible && (
       <div className="flex items-center gap-4 px-6 py-2 border-b border-zinc-100 dark:border-zinc-800 shrink-0 overflow-visible relative z-30 select-none">
         {/* Color Filter */}
         <div className="relative shrink-0 flex items-center gap-1">
@@ -1282,6 +1443,88 @@ export function AssetsPage() {
             )}
           </div>
 
+          {/* Dimension Axis Filter */}
+          <div className="relative">
+            <button
+              onClick={() => setIsDimensionFilterOpen(!isDimensionFilterOpen)}
+              className={`flex items-center gap-1 transition-colors ${hasDimensionFilter ? 'text-indigo-500 font-medium' : 'hover:text-zinc-900 dark:hover:text-zinc-100'}`}
+            >
+              <Ruler className="w-3 h-3" />
+              {hasDimensionFilter ? '尺寸轴: 已设置' : '尺寸轴'} <ChevronDown className="w-3 h-3" />
+            </button>
+            {isDimensionFilterOpen && (
+              <>
+                <div className="fixed inset-0 z-[9]" onClick={() => setIsDimensionFilterOpen(false)} />
+                <div className="absolute top-full left-0 mt-1 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg z-10 p-3 min-w-[240px]">
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <label className="flex flex-col gap-1 text-zinc-500">
+                      横轴最小
+                      <input
+                        type="number"
+                        min="0"
+                        inputMode="numeric"
+                        value={dimensionFilter.widthMin}
+                        onChange={(e) => setDimensionFilter(prev => ({ ...prev, widthMin: e.target.value.replace(/[^\d]/g, '') }))}
+                        className="w-full rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-2 py-1 text-zinc-700 dark:text-zinc-200 outline-none focus:border-indigo-500"
+                        placeholder="例如 1920"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1 text-zinc-500">
+                      横轴最大
+                      <input
+                        type="number"
+                        min="0"
+                        inputMode="numeric"
+                        value={dimensionFilter.widthMax}
+                        onChange={(e) => setDimensionFilter(prev => ({ ...prev, widthMax: e.target.value.replace(/[^\d]/g, '') }))}
+                        className="w-full rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-2 py-1 text-zinc-700 dark:text-zinc-200 outline-none focus:border-indigo-500"
+                        placeholder="例如 3840"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1 text-zinc-500">
+                      纵轴最小
+                      <input
+                        type="number"
+                        min="0"
+                        inputMode="numeric"
+                        value={dimensionFilter.heightMin}
+                        onChange={(e) => setDimensionFilter(prev => ({ ...prev, heightMin: e.target.value.replace(/[^\d]/g, '') }))}
+                        className="w-full rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-2 py-1 text-zinc-700 dark:text-zinc-200 outline-none focus:border-indigo-500"
+                        placeholder="例如 1080"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1 text-zinc-500">
+                      纵轴最大
+                      <input
+                        type="number"
+                        min="0"
+                        inputMode="numeric"
+                        value={dimensionFilter.heightMax}
+                        onChange={(e) => setDimensionFilter(prev => ({ ...prev, heightMax: e.target.value.replace(/[^\d]/g, '') }))}
+                        className="w-full rounded border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-2 py-1 text-zinc-700 dark:text-zinc-200 outline-none focus:border-indigo-500"
+                        placeholder="例如 2160"
+                      />
+                    </label>
+                  </div>
+                  <div className="mt-3 flex items-center justify-between">
+                    <button
+                      onClick={() => setDimensionFilter({ widthMin: '', widthMax: '', heightMin: '', heightMax: '' })}
+                      className="text-xs px-2 py-1 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors"
+                    >
+                      清空尺寸轴
+                    </button>
+                    <button
+                      onClick={() => setIsDimensionFilterOpen(false)}
+                      className="text-xs px-2 py-1 rounded bg-indigo-500 text-white hover:bg-indigo-600 transition-colors"
+                    >
+                      完成
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+
           {/* Shape Filter */}
           <div className="relative">
             <button
@@ -1365,6 +1608,7 @@ export function AssetsPage() {
           </div>
         </div>
       </div>
+      )}
 
       {/* Grid Area */}
       <ContextMenu.Root>
@@ -1503,13 +1747,7 @@ export function AssetsPage() {
                         onDelete={(hard: boolean) => handleDeleteAsset(asset.id, hard)}
                         onQuickAddTag={() => handleQuickAddTag(asset.id)}
                         onAssignWorkspace={async (wsId: string) => {
-                          // Workspace assignment now requires detail data
-                          await safeInvoke("update_asset", {
-                            id: asset.id,
-                            workspaceIds: JSON.stringify([wsId]),
-                            workspace_ids: JSON.stringify([wsId]),
-                          });
-                          triggerRefresh()
+                          await handleAssignWorkspace(asset.id, wsId)
                         }}
                         activeView={activeView}
                       />
@@ -1565,12 +1803,7 @@ export function AssetsPage() {
                           onDelete={(hard: boolean) => handleDeleteAsset(asset.id, hard)}
                           onQuickAddTag={() => handleQuickAddTag(asset.id)}
                           onAssignWorkspace={async (wsId: string) => {
-                            await safeInvoke("update_asset", {
-                              id: asset.id,
-                              workspaceIds: JSON.stringify([wsId]),
-                              workspace_ids: JSON.stringify([wsId]),
-                            });
-                            triggerRefresh()
+                            await handleAssignWorkspace(asset.id, wsId)
                           }}
                           activeView={activeView}
                         />

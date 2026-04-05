@@ -55,3 +55,35 @@ export default tseslint.config({
   },
 })
 ```
+
+## Windows Installer Release (QuickAsset)
+
+### 1) Set Version (must do before each release)
+
+```bash
+npm run version:set -- 0.1.1
+```
+
+This command synchronizes version in:
+- `package.json`
+- `package-lock.json`
+- `src-tauri/tauri.conf.json`
+- `src-tauri/Cargo.toml`
+
+### 2) Build Windows installers
+
+```bash
+npm run tauri:build:win
+```
+
+Artifacts are generated under:
+- `src-tauri/target/release/bundle/nsis/`
+- `src-tauri/target/release/bundle/msi/`
+
+### 3) Installer behavior configured in this repo
+
+- Produces both `NSIS (.exe)` and `MSI (.msi)` installers.
+- `allowDowngrades = false` to prevent installing lower versions over newer ones.
+- Stable WiX `upgradeCode` is set for proper MSI overwrite upgrades.
+- WebView2 runtime is bundled via `offlineInstaller` mode (no internet required on target machine).
+- NSIS creates Start Menu folder `QuickAsset`, and installer hook creates/removes desktop shortcut.

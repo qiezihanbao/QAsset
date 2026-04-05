@@ -138,6 +138,10 @@ pub fn init_library_db(db_path: &Path) -> SqlResult<()> {
         CREATE INDEX IF NOT EXISTS idx_asset_workspaces_workspace_asset ON asset_workspaces(workspace_id, asset_id);
         CREATE INDEX IF NOT EXISTS idx_asset_workspaces_asset ON asset_workspaces(asset_id);
 
+        DROP TRIGGER IF EXISTS trg_assets_after_insert_fts;
+        DROP TRIGGER IF EXISTS trg_assets_after_update_fts;
+        DROP TRIGGER IF EXISTS trg_assets_after_delete_fts;
+
         CREATE TRIGGER IF NOT EXISTS trg_assets_after_insert_tags
         AFTER INSERT ON assets
         BEGIN
@@ -212,7 +216,7 @@ pub fn init_library_db(db_path: &Path) -> SqlResult<()> {
             DELETE FROM asset_workspaces WHERE asset_id = OLD.id;
         END;
 
-        CREATE TRIGGER IF NOT EXISTS trg_assets_after_insert_fts
+        CREATE TRIGGER trg_assets_after_insert_fts
         AFTER INSERT ON assets
         BEGIN
             INSERT INTO assets_fts(rowid, asset_id, name, relative_path)
@@ -224,17 +228,10 @@ pub fn init_library_db(db_path: &Path) -> SqlResult<()> {
             );
         END;
 
-        CREATE TRIGGER IF NOT EXISTS trg_assets_after_update_fts
+        CREATE TRIGGER trg_assets_after_update_fts
         AFTER UPDATE OF id, name, relative_path ON assets
         BEGIN
-            INSERT INTO assets_fts(assets_fts, rowid, asset_id, name, relative_path)
-            VALUES (
-                'delete',
-                OLD.rowid,
-                OLD.id,
-                OLD.name,
-                REPLACE(OLD.relative_path, char(92), '/')
-            );
+            DELETE FROM assets_fts WHERE rowid = OLD.rowid;
             INSERT INTO assets_fts(rowid, asset_id, name, relative_path)
             VALUES (
                 NEW.rowid,
@@ -244,17 +241,10 @@ pub fn init_library_db(db_path: &Path) -> SqlResult<()> {
             );
         END;
 
-        CREATE TRIGGER IF NOT EXISTS trg_assets_after_delete_fts
+        CREATE TRIGGER trg_assets_after_delete_fts
         AFTER DELETE ON assets
         BEGIN
-            INSERT INTO assets_fts(assets_fts, rowid, asset_id, name, relative_path)
-            VALUES (
-                'delete',
-                OLD.rowid,
-                OLD.id,
-                OLD.name,
-                REPLACE(OLD.relative_path, char(92), '/')
-            );
+            DELETE FROM assets_fts WHERE rowid = OLD.rowid;
         END;
         "
     )?;

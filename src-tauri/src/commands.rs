@@ -5,6 +5,8 @@ use notify::Watcher;
 use image::GenericImageView;
 use std::path::{Path, PathBuf};
 use image_hasher;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 
 fn get_library_root(state: &State<'_, crate::library::AppState>) -> Result<std::path::PathBuf, String> {
     state.library_root.read().map_err(|e| e.to_string())?
@@ -100,6 +102,31 @@ fn sync_asset_dimensions(
     )
     .map_err(|e| format!("Failed to update asset dimensions: {}", e))?;
     Ok(())
+}
+
+fn parse_string_list_json(raw: Option<&str>) -> Vec<String> {
+    let Some(text) = raw else {
+        return Vec::new();
+    };
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(text);
+    let Some(arr) = parsed.ok().and_then(|v| v.as_array().cloned()) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for item in arr {
+        let Some(s) = item.as_str().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        let value = s.to_string();
+        if seen.insert(value.clone()) {
+            out.push(value);
+        }
+    }
+    out
 }
 
 fn clip_debug_enabled() -> bool {
@@ -961,11 +988,176 @@ pub async fn update_asset(
 }
 
 #[tauri::command]
+pub async fn batch_update_asset_tags(
+    ids: Vec<String>,
+    add_tags: Option<Vec<String>>,
+    remove_tags: Option<Vec<String>>,
+    state: State<'_, crate::library::AppState>,
+) -> Result<u32, String> {
+    let db_path = get_db_path(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        let mut add_set = HashSet::new();
+        let add_tags_clean: Vec<String> = add_tags
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .filter(|v| add_set.insert(v.clone()))
+            .collect();
+
+        let remove_set: HashSet<String> = remove_tags
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect();
+
+        if ids.is_empty() || (add_tags_clean.is_empty() && remove_set.is_empty()) {
+            return Ok(0);
+        }
+
+        let conn = library::get_db_connection(&db_path)?;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Transaction begin failed: {}", e))?;
+
+        let mut updated_count: u32 = 0;
+        {
+            let mut select_stmt = tx
+                .prepare("SELECT tags FROM assets WHERE id = ?1")
+                .map_err(|e| format!("Prepare select failed: {}", e))?;
+            let mut update_stmt = tx
+                .prepare("UPDATE assets SET tags = ?1 WHERE id = ?2")
+                .map_err(|e| format!("Prepare update failed: {}", e))?;
+
+            for id in ids {
+                let current_tags: Option<String> = match select_stmt.query_row(rusqlite::params![id], |row| row.get(0)) {
+                    Ok(value) => value,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                    Err(e) => return Err(format!("Read tags failed: {}", e)),
+                };
+
+                let mut tags = parse_string_list_json(current_tags.as_deref());
+
+                if !remove_set.is_empty() {
+                    tags.retain(|t| !remove_set.contains(t));
+                }
+
+                if !add_tags_clean.is_empty() {
+                    let mut existing: HashSet<String> = tags.iter().cloned().collect();
+                    for tag in &add_tags_clean {
+                        if existing.insert(tag.clone()) {
+                            tags.push(tag.clone());
+                        }
+                    }
+                }
+
+                let tags_json = serde_json::to_string(&tags).map_err(|e| format!("Serialize tags failed: {}", e))?;
+                update_stmt
+                    .execute(rusqlite::params![tags_json, id])
+                    .map_err(|e| format!("Update tags failed: {}", e))?;
+                updated_count = updated_count.saturating_add(1);
+            }
+        }
+
+        tx.commit()
+            .map_err(|e| format!("Commit failed: {}", e))?;
+
+        Ok(updated_count)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn batch_update_asset_workspaces(
+    ids: Vec<String>,
+    add_workspace_ids: Option<Vec<String>>,
+    remove_workspace_ids: Option<Vec<String>>,
+    state: State<'_, crate::library::AppState>,
+) -> Result<u32, String> {
+    let db_path = get_db_path(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        let mut add_set = HashSet::new();
+        let add_ws_clean: Vec<String> = add_workspace_ids
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .filter(|v| add_set.insert(v.clone()))
+            .collect();
+
+        let remove_set: HashSet<String> = remove_workspace_ids
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect();
+
+        if ids.is_empty() || (add_ws_clean.is_empty() && remove_set.is_empty()) {
+            return Ok(0);
+        }
+
+        let conn = library::get_db_connection(&db_path)?;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Transaction begin failed: {}", e))?;
+
+        let mut updated_count: u32 = 0;
+        {
+            let mut select_stmt = tx
+                .prepare("SELECT workspace_ids FROM assets WHERE id = ?1")
+                .map_err(|e| format!("Prepare select failed: {}", e))?;
+            let mut update_stmt = tx
+                .prepare("UPDATE assets SET workspace_ids = ?1 WHERE id = ?2")
+                .map_err(|e| format!("Prepare update failed: {}", e))?;
+
+            for id in ids {
+                let current_workspaces: Option<String> =
+                    match select_stmt.query_row(rusqlite::params![id], |row| row.get(0)) {
+                        Ok(value) => value,
+                        Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                        Err(e) => return Err(format!("Read workspaces failed: {}", e)),
+                    };
+
+                let mut workspaces = parse_string_list_json(current_workspaces.as_deref());
+
+                if !remove_set.is_empty() {
+                    workspaces.retain(|w| !remove_set.contains(w));
+                }
+
+                if !add_ws_clean.is_empty() {
+                    let mut existing: HashSet<String> = workspaces.iter().cloned().collect();
+                    for ws in &add_ws_clean {
+                        if existing.insert(ws.clone()) {
+                            workspaces.push(ws.clone());
+                        }
+                    }
+                }
+
+                let ws_json =
+                    serde_json::to_string(&workspaces).map_err(|e| format!("Serialize workspaces failed: {}", e))?;
+                update_stmt
+                    .execute(rusqlite::params![ws_json, id])
+                    .map_err(|e| format!("Update workspaces failed: {}", e))?;
+                updated_count = updated_count.saturating_add(1);
+            }
+        }
+
+        tx.commit()
+            .map_err(|e| format!("Commit failed: {}", e))?;
+
+        Ok(updated_count)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub async fn delete_assets(
     ids: Vec<String>,
     state: State<'_, crate::library::AppState>,
 ) -> Result<(), String> {
     let db_path = get_db_path(&state)?;
+    let library_root = get_library_root(&state)?;
 
     tokio::task::spawn_blocking(move || {
         let conn = library::get_db_connection(&db_path)?;
@@ -973,15 +1165,20 @@ pub async fn delete_assets(
         let tx = conn.unchecked_transaction().map_err(|e| format!("Transaction begin failed: {}", e))?;
 
         if !ids.is_empty() {
-            let placeholders: Vec<String> = ids.iter().enumerate()
-                .map(|(i, _)| format!("?{}", i + 1))
-                .collect();
-            let sql = format!("DELETE FROM assets WHERE id IN ({})", placeholders.join(", "));
-            let params: Vec<&dyn rusqlite::types::ToSql> = ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
-            tx.execute(&sql, params.as_slice()).map_err(|e| format!("Delete failed: {}", e))?;
+            // Delete one-by-one in a single transaction to avoid SQLite variable limits.
+            let mut delete_stmt = tx
+                .prepare("DELETE FROM assets WHERE id = ?1")
+                .map_err(|e| format!("Prepare delete failed: {}", e))?;
+
+            for id in ids {
+                delete_stmt
+                    .execute(rusqlite::params![id])
+                    .map_err(|e| format!("Delete failed: {}", e))?;
+            }
         }
 
         tx.commit().map_err(|e| format!("Commit failed: {}", e))?;
+        crate::scanner::rebuild_folders(&conn, &library_root)?;
         Ok(())
     }).await.map_err(|e| e.to_string())?
 }
@@ -1271,75 +1468,89 @@ pub async fn migrate_hashed(
 
         let total = rows.len() as u32;
         let mut migrated: u32 = 0;
+        let mut processed: u32 = 0;
+
+        if total > 0 {
+            let _ = app_handle.emit("migrate-progress", serde_json::json!({
+                "migrated": 0,
+                "total": total,
+            }));
+        }
 
         for (_i, (id, path_str, rel_path)) in rows.iter().enumerate() {
             let abs_path = std::path::Path::new(path_str);
-            if !abs_path.exists() { continue; }
+            let mut migrated_this_item = false;
 
-            let img = match crate::scanner::open_image_for_processing(abs_path) {
-                Ok(img) => img,
-                Err(_) => continue,
-            };
+            if abs_path.exists() {
+                if let Ok(img) = crate::scanner::open_image_for_processing(abs_path) {
+                    // Compute pHash
+                    let hasher = image_hasher::HasherConfig::new()
+                        .hash_alg(image_hasher::HashAlg::Gradient)
+                        .to_hasher();
+                    let hash = hasher.hash_image(&img);
+                    let p_hash_b64 = hash.to_base64();
 
-            // Compute pHash
-            let hasher = image_hasher::HasherConfig::new()
-                .hash_alg(image_hasher::HashAlg::Gradient)
-                .to_hasher();
-            let hash = hasher.hash_image(&img);
-            let p_hash_b64 = hash.to_base64();
+                    // Extract dimensions and dominant color
+                    let width = img.width();
+                    let height = img.height();
+                    let dominant_color = {
+                        let tiny = img.thumbnail(16, 16);
+                        let mut r_sum: u64 = 0;
+                        let mut g_sum: u64 = 0;
+                        let mut b_sum: u64 = 0;
+                        let mut count: u64 = 0;
+                        for pixel in tiny.pixels() {
+                            let rgba = pixel.2;
+                            if rgba[3] < 128 { continue; }
+                            r_sum += rgba[0] as u64;
+                            g_sum += rgba[1] as u64;
+                            b_sum += rgba[2] as u64;
+                            count += 1;
+                        }
+                        if count > 0 {
+                            Some(format!("#{:02x}{:02x}{:02x}", (r_sum/count) as u8, (g_sum/count) as u8, (b_sum/count) as u8))
+                        } else { None }
+                    };
 
-            // Extract dimensions and dominant color
-            let width = img.width();
-            let height = img.height();
-            let dominant_color = {
-                let tiny = img.thumbnail(16, 16);
-                let mut r_sum: u64 = 0;
-                let mut g_sum: u64 = 0;
-                let mut b_sum: u64 = 0;
-                let mut count: u64 = 0;
-                for pixel in tiny.pixels() {
-                    let rgba = pixel.2;
-                    if rgba[3] < 128 { continue; }
-                    r_sum += rgba[0] as u64;
-                    g_sum += rgba[1] as u64;
-                    b_sum += rgba[2] as u64;
-                    count += 1;
-                }
-                if count > 0 {
-                    Some(format!("#{:02x}{:02x}{:02x}", (r_sum/count) as u8, (g_sum/count) as u8, (b_sum/count) as u8))
-                } else { None }
-            };
+                    // Generate thumbnail
+                    let thumb_path = crate::thumbnails::ensure_thumbnail_dir(&library_root, rel_path);
+                    if let Ok(tp) = thumb_path {
+                        let thumb_img = img.thumbnail(256, 256);
+                        if let Ok(file) = std::fs::File::create(&tp) {
+                            let mut writer = std::io::BufWriter::new(file);
+                            let _ = thumb_img.write_to(&mut writer, image::ImageFormat::Png);
+                        }
+                    }
 
-            // Generate thumbnail
-            let thumb_path = crate::thumbnails::ensure_thumbnail_dir(&library_root, rel_path);
-            if let Ok(tp) = thumb_path {
-                let thumb_img = img.thumbnail(256, 256);
-                if let Ok(file) = std::fs::File::create(&tp) {
-                    let mut writer = std::io::BufWriter::new(file);
-                    let _ = thumb_img.write_to(&mut writer, image::ImageFormat::Png);
+                    // Update DB
+                    conn.execute(
+                        "UPDATE assets SET p_hash = ?1, width = ?2, height = ?3, dominant_color = COALESCE(dominant_color, ?4) WHERE id = ?5",
+                        rusqlite::params![p_hash_b64, width, height, dominant_color, id],
+                    ).map_err(|e| format!("Update failed for {}: {}", id, e))?;
+
+                    migrated += 1;
+                    migrated_this_item = true;
                 }
             }
 
-            // Update DB
-            conn.execute(
-                "UPDATE assets SET p_hash = ?1, width = ?2, height = ?3, dominant_color = COALESCE(dominant_color, ?4) WHERE id = ?5",
-                rusqlite::params![p_hash_b64, width, height, dominant_color, id],
-            ).map_err(|e| format!("Update failed for {}: {}", id, e))?;
+            if !migrated_this_item {
+                log::debug!("Skip hash migration for asset '{}': decode failed or source missing", id);
+            }
 
-            migrated += 1;
+            processed += 1;
 
-            // Emit progress every 10 items or on last item
-            if migrated % 10 == 0 || migrated == total {
+            // Progress should represent processed workload, not only successful migrations.
+            if processed % 10 == 0 || processed == total {
                 let _ = app_handle.emit("migrate-progress", serde_json::json!({
-                    "migrated": migrated,
+                    "migrated": processed,
                     "total": total,
                 }));
             }
         }
 
-        // Final progress event
+        // Final progress event to ensure UI can complete and auto-dismiss.
         let _ = app_handle.emit("migrate-progress", serde_json::json!({
-            "migrated": migrated,
+            "migrated": total,
             "total": total,
         }));
 
@@ -1498,6 +1709,461 @@ pub async fn get_library_stats(
     }).await.map_err(|e| e.to_string())?
 }
 
+struct SimilarScanRow {
+    item: SimilarAssetItem,
+    hash: image_hasher::ImageHash<Vec<u8>>,
+}
+
+struct BkNode {
+    asset_index: usize,
+    children: Vec<(u32, usize)>,
+}
+
+struct BkTree {
+    root: Option<usize>,
+    nodes: Vec<BkNode>,
+}
+
+impl BkTree {
+    fn new() -> Self {
+        Self {
+            root: None,
+            nodes: Vec::new(),
+        }
+    }
+
+    fn insert(&mut self, asset_index: usize, hashes: &[image_hasher::ImageHash<Vec<u8>>]) {
+        let Some(root_idx) = self.root else {
+            self.nodes.push(BkNode {
+                asset_index,
+                children: Vec::new(),
+            });
+            self.root = Some(0);
+            return;
+        };
+
+        let hash = &hashes[asset_index];
+        let mut current_idx = root_idx;
+        loop {
+            let dist = hash.dist(&hashes[self.nodes[current_idx].asset_index]);
+
+            if let Some((_, child_idx)) = self.nodes[current_idx]
+                .children
+                .iter()
+                .find(|(edge_dist, _)| *edge_dist == dist)
+            {
+                current_idx = *child_idx;
+                continue;
+            }
+
+            let next_idx = self.nodes.len();
+            self.nodes.push(BkNode {
+                asset_index,
+                children: Vec::new(),
+            });
+            self.nodes[current_idx].children.push((dist, next_idx));
+            break;
+        }
+    }
+
+    fn search(
+        &self,
+        query_index: usize,
+        radius: u32,
+        hashes: &[image_hasher::ImageHash<Vec<u8>>],
+        out_indices: &mut Vec<usize>,
+    ) {
+        let Some(root_idx) = self.root else {
+            return;
+        };
+
+        let query_hash = &hashes[query_index];
+        let mut stack = vec![root_idx];
+        while let Some(node_idx) = stack.pop() {
+            let node = &self.nodes[node_idx];
+            let dist = query_hash.dist(&hashes[node.asset_index]);
+            if dist <= radius {
+                out_indices.push(node.asset_index);
+            }
+
+            let lower = dist.saturating_sub(radius);
+            let upper = dist.saturating_add(radius);
+            for (edge_dist, child_idx) in &node.children {
+                if *edge_dist >= lower && *edge_dist <= upper {
+                    stack.push(*child_idx);
+                }
+            }
+        }
+    }
+}
+
+struct UnionFind {
+    parent: Vec<usize>,
+    rank: Vec<u8>,
+}
+
+impl UnionFind {
+    fn new(size: usize) -> Self {
+        Self {
+            parent: (0..size).collect(),
+            rank: vec![0; size],
+        }
+    }
+
+    fn find(&mut self, x: usize) -> usize {
+        if self.parent[x] != x {
+            let root = self.find(self.parent[x]);
+            self.parent[x] = root;
+        }
+        self.parent[x]
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let mut ra = self.find(a);
+        let mut rb = self.find(b);
+        if ra == rb {
+            return;
+        }
+        if self.rank[ra] < self.rank[rb] {
+            std::mem::swap(&mut ra, &mut rb);
+        }
+        self.parent[rb] = ra;
+        if self.rank[ra] == self.rank[rb] {
+            self.rank[ra] = self.rank[ra].saturating_add(1);
+        }
+    }
+}
+
+fn opt_i64_to_u32(value: Option<i64>) -> Option<u32> {
+    value.and_then(|v| {
+        if v > 0 && v <= u32::MAX as i64 {
+            Some(v as u32)
+        } else {
+            None
+        }
+    })
+}
+
+fn keep_candidate_cmp(a: &SimilarAssetItem, b: &SimilarAssetItem) -> Ordering {
+    let a_pixels = a.width.unwrap_or(0) as u64 * a.height.unwrap_or(0) as u64;
+    let b_pixels = b.width.unwrap_or(0) as u64 * b.height.unwrap_or(0) as u64;
+
+    a_pixels
+        .cmp(&b_pixels)
+        .then_with(|| a.size.cmp(&b.size))
+        .then_with(|| a.rating.unwrap_or(0).cmp(&b.rating.unwrap_or(0)))
+        .then_with(|| a.modified_at.cmp(&b.modified_at))
+        .then_with(|| a.created_at.cmp(&b.created_at))
+        .then_with(|| b.id.cmp(&a.id))
+}
+
+fn suggested_keep_index(indices: &[usize], items: &[SimilarAssetItem]) -> usize {
+    let mut best_idx = indices[0];
+    for idx in indices.iter().copied().skip(1) {
+        if keep_candidate_cmp(&items[idx], &items[best_idx]).is_gt() {
+            best_idx = idx;
+        }
+    }
+    best_idx
+}
+
+#[tauri::command]
+pub async fn find_similar_groups(
+    threshold: u32,
+    max_groups: Option<u32>,
+    state: State<'_, crate::library::AppState>,
+) -> Result<SimilarGroupsResult, String> {
+    let db_path = get_db_path(&state)?;
+    let library_root = get_library_root(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        let conn = library::get_db_connection(&db_path)?;
+        let threshold_dist = threshold.min(64);
+        let limit_groups = max_groups.unwrap_or(300).clamp(1, 5000) as usize;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, path, relative_path, size, width, height, created_at, modified_at, rating, p_hash
+                 FROM assets
+                 WHERE is_trashed = 0
+                   AND asset_type = 'image'
+                   AND p_hash IS NOT NULL
+                   AND p_hash != ''",
+            )
+            .map_err(|e| format!("Prepare similar scan failed: {}", e))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let name: String = row.get(1)?;
+                let path: String = row.get(2)?;
+                let relative_path: String = row.get(3)?;
+                let size_i64: i64 = row.get(4)?;
+                let width_i64: Option<i64> = row.get(5)?;
+                let height_i64: Option<i64> = row.get(6)?;
+                let created_at: u64 = row.get(7)?;
+                let modified_at: u64 = row.get(8)?;
+                let rating: Option<u8> = row.get(9)?;
+                let p_hash: String = row.get(10)?;
+                Ok((
+                    id,
+                    name,
+                    path,
+                    relative_path,
+                    size_i64,
+                    width_i64,
+                    height_i64,
+                    created_at,
+                    modified_at,
+                    rating,
+                    p_hash,
+                ))
+            })
+            .map_err(|e| format!("Query similar scan failed: {}", e))?;
+
+        let mut rows_decoded: Vec<SimilarScanRow> = Vec::new();
+        for row in rows {
+            let (
+                id,
+                name,
+                path,
+                relative_path,
+                size_i64,
+                width_i64,
+                height_i64,
+                created_at,
+                modified_at,
+                rating,
+                p_hash_b64,
+            ) = row.map_err(|e: rusqlite::Error| e.to_string())?;
+
+            let Ok(hash) = image_hasher::ImageHash::<Vec<u8>>::from_base64(&p_hash_b64) else {
+                continue;
+            };
+
+            let size = if size_i64 > 0 { size_i64 as u64 } else { 0 };
+            let thumb_path = crate::thumbnails::thumbnail_abs_path(&library_root, &relative_path);
+            let thumbnail_path = if thumb_path.exists() {
+                Some(thumb_path.to_string_lossy().to_string())
+            } else {
+                None
+            };
+
+            rows_decoded.push(SimilarScanRow {
+                item: SimilarAssetItem {
+                    id,
+                    name,
+                    path,
+                    relative_path,
+                    size,
+                    width: opt_i64_to_u32(width_i64),
+                    height: opt_i64_to_u32(height_i64),
+                    created_at,
+                    modified_at,
+                    rating,
+                    thumbnail_path,
+                },
+                hash,
+            });
+        }
+
+        let total_images_scanned = rows_decoded.len() as u32;
+        if rows_decoded.len() < 2 {
+            return Ok(SimilarGroupsResult {
+                threshold: threshold_dist,
+                total_images_scanned,
+                groups_count: 0,
+                duplicate_assets_count: 0,
+                reclaimable_size: 0,
+                groups: Vec::new(),
+            });
+        }
+
+        let items: Vec<SimilarAssetItem> = rows_decoded.iter().map(|r| r.item.clone()).collect();
+        let hashes: Vec<image_hasher::ImageHash<Vec<u8>>> =
+            rows_decoded.into_iter().map(|r| r.hash).collect();
+
+        let mut tree = BkTree::new();
+        let mut uf = UnionFind::new(items.len());
+        let mut candidates = Vec::new();
+
+        for idx in 0..items.len() {
+            tree.search(idx, threshold_dist, &hashes, &mut candidates);
+            for other_idx in candidates.drain(..) {
+                if other_idx == idx {
+                    continue;
+                }
+                if hashes[idx].dist(&hashes[other_idx]) <= threshold_dist {
+                    uf.union(idx, other_idx);
+                }
+            }
+            tree.insert(idx, &hashes);
+        }
+
+        let mut grouped: HashMap<usize, Vec<usize>> = HashMap::new();
+        for idx in 0..items.len() {
+            let root = uf.find(idx);
+            grouped.entry(root).or_default().push(idx);
+        }
+
+        let mut groups: Vec<SimilarGroup> = Vec::new();
+        for member_indices in grouped.into_values() {
+            if member_indices.len() < 2 {
+                continue;
+            }
+
+            let keep_idx = suggested_keep_index(&member_indices, &items);
+            let keep_id = items[keep_idx].id.clone();
+            let mut members = member_indices
+                .iter()
+                .map(|idx| items[*idx].clone())
+                .collect::<Vec<_>>();
+            members.sort_by(|a, b| keep_candidate_cmp(b, a));
+
+            let mut reclaimable_size: u64 = 0;
+            let mut suggested_delete_ids = Vec::new();
+            for idx in member_indices {
+                if idx == keep_idx {
+                    continue;
+                }
+                reclaimable_size = reclaimable_size.saturating_add(items[idx].size);
+                suggested_delete_ids.push(items[idx].id.clone());
+            }
+
+            groups.push(SimilarGroup {
+                group_id: String::new(),
+                members,
+                suggested_keep_id: keep_id,
+                suggested_delete_ids,
+                reclaimable_size,
+            });
+        }
+
+        groups.sort_by(|a, b| {
+            b.reclaimable_size
+                .cmp(&a.reclaimable_size)
+                .then_with(|| b.members.len().cmp(&a.members.len()))
+        });
+        if groups.len() > limit_groups {
+            groups.truncate(limit_groups);
+        }
+        for (idx, group) in groups.iter_mut().enumerate() {
+            group.group_id = format!("group-{}", idx + 1);
+        }
+
+        let groups_count = groups.len() as u32;
+        let duplicate_assets_count = groups
+            .iter()
+            .map(|g| g.suggested_delete_ids.len() as u32)
+            .sum();
+        let reclaimable_size = groups.iter().map(|g| g.reclaimable_size).sum();
+
+        Ok(SimilarGroupsResult {
+            threshold: threshold_dist,
+            total_images_scanned,
+            groups_count,
+            duplicate_assets_count,
+            reclaimable_size,
+            groups,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn apply_similar_dedupe(
+    delete_ids: Vec<String>,
+    delete_files: Option<bool>,
+    state: State<'_, crate::library::AppState>,
+) -> Result<SimilarApplyResult, String> {
+    let db_path = get_db_path(&state)?;
+    let library_root = get_library_root(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        let conn = library::get_db_connection(&db_path)?;
+        let should_delete_files = delete_files.unwrap_or(true);
+        let mut seen = HashSet::new();
+        let deduped_ids: Vec<String> = delete_ids
+            .into_iter()
+            .filter(|id| !id.trim().is_empty())
+            .filter(|id| seen.insert(id.clone()))
+            .collect();
+
+        if deduped_ids.is_empty() {
+            return Ok(SimilarApplyResult {
+                deleted_count: 0,
+                failed_ids: Vec::new(),
+            });
+        }
+
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Transaction begin failed: {}", e))?;
+
+        let mut deleted_count: u32 = 0;
+        let mut failed_ids = Vec::new();
+        {
+            let mut select_stmt = tx
+                .prepare("SELECT path, relative_path FROM assets WHERE id = ?1")
+                .map_err(|e| format!("Prepare select failed: {}", e))?;
+            let mut delete_stmt = tx
+                .prepare("DELETE FROM assets WHERE id = ?1")
+                .map_err(|e| format!("Prepare delete failed: {}", e))?;
+
+            for id in deduped_ids {
+                let (abs_path, relative_path): (String, String) = match select_stmt.query_row(rusqlite::params![&id], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                }) {
+                    Ok(values) => values,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {
+                        failed_ids.push(id);
+                        continue;
+                    }
+                    Err(e) => return Err(format!("Read asset for dedupe failed: {}", e)),
+                };
+
+                if should_delete_files {
+                    let file_path = std::path::Path::new(&abs_path);
+                    if file_path.exists() {
+                        if let Err(e) = std::fs::remove_file(file_path) {
+                            log::warn!("Failed to delete duplicate file '{}': {}", abs_path, e);
+                            failed_ids.push(id);
+                            continue;
+                        }
+                    }
+                }
+
+                match delete_stmt.execute(rusqlite::params![&id]) {
+                    Ok(affected) if affected > 0 => {
+                        deleted_count = deleted_count.saturating_add(1);
+                        let thumb_path =
+                            crate::thumbnails::thumbnail_abs_path(&library_root, &relative_path);
+                        let _ = std::fs::remove_file(&thumb_path);
+                    }
+                    Ok(_) => {
+                        failed_ids.push(id);
+                    }
+                    Err(_) => {
+                        failed_ids.push(id);
+                    }
+                }
+            }
+        }
+
+        tx.commit()
+            .map_err(|e| format!("Commit failed: {}", e))?;
+        crate::scanner::rebuild_folders(&conn, &library_root)?;
+
+        Ok(SimilarApplyResult {
+            deleted_count,
+            failed_ids,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn find_similar_images(
     target_id: String,
@@ -1548,6 +2214,173 @@ pub async fn find_similar_images(
 
         Ok(similar_ids)
     }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn rebuild_all_thumbnails(
+    state: State<'_, crate::library::AppState>,
+) -> Result<u32, String> {
+    let db_path = get_db_path(&state)?;
+    let library_root = get_library_root(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        let conn = library::get_db_connection(&db_path)?;
+
+        let assets: Vec<(String, String, String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, path, relative_path, asset_type
+                     FROM assets
+                     WHERE is_trashed = 0
+                       AND asset_type IN ('image', 'video')
+                     ORDER BY modified_at DESC",
+                )
+                .map_err(|e| format!("Prepare failed: {}", e))?;
+            let rows = stmt
+                .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+                .map_err(|e| format!("Query failed: {}", e))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Transaction begin failed: {}", e))?;
+        let mut update_stmt = tx
+            .prepare(
+                "UPDATE assets
+                 SET dominant_color = ?1, width = ?2, height = ?3, p_hash = ?4, thumbnail_mtime = ?5
+                 WHERE id = ?6",
+            )
+            .map_err(|e| format!("Prepare update failed: {}", e))?;
+        let mut clear_stmt = tx
+            .prepare("UPDATE assets SET thumbnail_mtime = NULL WHERE id = ?1")
+            .map_err(|e| format!("Prepare clear failed: {}", e))?;
+
+        let mut rebuilt_count: u32 = 0;
+        for (id, abs_path, relative_path, asset_type) in assets {
+            let file_path = std::path::Path::new(&abs_path);
+            if !file_path.exists() {
+                let _ = clear_stmt.execute(rusqlite::params![id]);
+                continue;
+            }
+
+            let processed = if asset_type == "video" {
+                crate::scanner::process_video(&library_root, &relative_path, file_path)
+            } else {
+                crate::scanner::process_image(&library_root, &relative_path, file_path)
+            };
+
+            if processed.thumbnail_mtime.is_none() {
+                let _ = clear_stmt.execute(rusqlite::params![id]);
+                continue;
+            }
+
+            let width = if processed.width > 0 {
+                Some(processed.width)
+            } else {
+                None
+            };
+            let height = if processed.height > 0 {
+                Some(processed.height)
+            } else {
+                None
+            };
+
+            update_stmt
+                .execute(rusqlite::params![
+                    processed.dominant_color,
+                    width,
+                    height,
+                    processed.p_hash,
+                    processed.thumbnail_mtime,
+                    id,
+                ])
+                .map_err(|e| format!("Thumbnail rebuild update failed: {}", e))?;
+            rebuilt_count = rebuilt_count.saturating_add(1);
+        }
+
+        drop(update_stmt);
+        drop(clear_stmt);
+        tx.commit()
+            .map_err(|e| format!("Rebuild commit failed: {}", e))?;
+
+        Ok(rebuilt_count)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn rebuild_search_index(
+    state: State<'_, crate::library::AppState>,
+) -> Result<u32, String> {
+    let db_path = get_db_path(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        let conn = library::get_db_connection(&db_path)?;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Transaction begin failed: {}", e))?;
+
+        tx.execute_batch(
+            "DELETE FROM asset_tags;
+             DELETE FROM asset_workspaces;
+
+             INSERT OR IGNORE INTO asset_tags(asset_id, tag)
+             SELECT
+                 a.id,
+                 TRIM(CAST(j.value AS TEXT)) AS tag
+             FROM assets AS a
+             JOIN json_each(
+                 CASE
+                     WHEN json_valid(a.tags) THEN a.tags
+                     ELSE '[]'
+                 END
+             ) AS j
+             WHERE TRIM(CAST(j.value AS TEXT)) != '';
+
+             INSERT OR IGNORE INTO asset_workspaces(asset_id, workspace_id)
+             SELECT
+                 a.id,
+                 TRIM(CAST(j.value AS TEXT)) AS workspace_id
+             FROM assets AS a
+             JOIN json_each(
+                 CASE
+                     WHEN json_valid(a.workspace_ids) THEN a.workspace_ids
+                     ELSE '[]'
+                 END
+             ) AS j
+             WHERE TRIM(CAST(j.value AS TEXT)) != '';
+
+             DELETE FROM assets_fts;
+             INSERT INTO assets_fts(rowid, asset_id, name, relative_path)
+             SELECT
+                 rowid,
+                 id,
+                 name,
+                 REPLACE(relative_path, char(92), '/')
+             FROM assets;",
+        )
+        .map_err(|e| format!("Failed to rebuild index tables: {}", e))?;
+
+        let total_assets: i64 = tx
+            .query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))
+            .map_err(|e| format!("Failed to count assets: {}", e))?;
+
+        tx.commit()
+            .map_err(|e| format!("Reindex commit failed: {}", e))?;
+
+        Ok(total_assets.max(0) as u32)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

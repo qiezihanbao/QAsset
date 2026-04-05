@@ -102,11 +102,11 @@ export interface Workspace {
 }
 
 export type SortConfig = {
-  field: 'name' | 'size' | 'created_at' | 'modified_at' | 'rating'
+  field: 'name' | 'size' | 'created_at' | 'modified_at' | 'rating' | 'custom' | 'random'
   order: 'asc' | 'desc'
 }
 
-export type ViewType = 'all' | 'unorganized' | 'trash' | 'tags' | 'workspace'
+export type ViewType = 'all' | 'unorganized' | 'trash' | 'tags' | 'workspace' | 'similar'
 
 export interface ColorFilter {
   hex: string;

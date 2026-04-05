@@ -17,15 +17,32 @@ export function RightSidebar() {
     s.assets, s.selectedAssets, s.workspaces, s.assetDetail, s.setAssetDetail,
     s.updateAssetProperty, s.setSimilarAssetIds, s.toggleRightSidebar, s.tagsSummary,
   ])))
-  const selectedAsset = assets.find((asset) => asset.id === selectedAssets[0]) ?? null
+  const isBatchSelection = selectedAssets.length > 1
+  const selectedAsset = !isBatchSelection
+    ? assets.find((asset) => asset.id === selectedAssets[0]) ?? null
+    : null
   const [descInput, setDescInput] = useState("")
   const [sourceUrlInput, setSourceUrlInput] = useState("")
   const [tagInput, setTagInput] = useState("")
   const [showTagPopover, setShowTagPopover] = useState(false)
   const [isSearchingSimilar, setIsSearchingSimilar] = useState(false)
+  const [batchTagInput, setBatchTagInput] = useState("")
+  const [isBatchMutating, setIsBatchMutating] = useState(false)
+
+  const safeInvoke = async (command: string, args?: Record<string, unknown>) => {
+    if (hasTauriRuntime()) {
+      return await invoke(command, args)
+    } else {
+      console.warn(`Tauri environment not detected. Skipped command: ${command}`, args)
+    }
+  }
 
   // Fetch asset detail from backend when selection changes
   useEffect(() => {
+    if (isBatchSelection) {
+      setAssetDetail(null)
+      return
+    }
     if (selectedAsset && hasTauriRuntime()) {
       invoke<AssetDetail>('get_asset_detail', { id: selectedAsset.id })
         .then((detail) => {
@@ -42,9 +59,9 @@ export function RightSidebar() {
     } else {
       setAssetDetail(null)
     }
-  }, [selectedAsset, setAssetDetail])
+  }, [isBatchSelection, selectedAsset, setAssetDetail])
 
-  if (!selectedAsset) {
+  if (selectedAssets.length === 0) {
     return (
       <aside className={isMobile
         ? "fixed inset-y-0 right-0 z-40 flex h-full w-[min(20rem,calc(100vw-1rem))] shrink-0 flex-col border-l border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
@@ -65,13 +82,157 @@ export function RightSidebar() {
     )
   }
 
-  const safeInvoke = async (command: string, args?: Record<string, unknown>) => {
-    if (hasTauriRuntime()) {
-      return await invoke(command, args)
-    } else {
-      console.warn(`Tauri environment not detected. Skipped command: ${command}`, args)
+  const parseBatchTags = (raw: string) => {
+    return Array.from(
+      new Set(
+        raw
+          .split(/[,\uFF0C]/)
+          .map((v) => v.trim())
+          .filter(Boolean)
+      )
+    )
+  }
+
+  const runBatchTagUpdate = async (mode: 'add' | 'remove') => {
+    const tags = parseBatchTags(batchTagInput)
+    if (tags.length === 0 || isBatchMutating) return
+    setIsBatchMutating(true)
+    try {
+      await safeInvoke("batch_update_asset_tags", {
+        ids: selectedAssets,
+        addTags: mode === 'add' ? tags : [],
+        add_tags: mode === 'add' ? tags : [],
+        removeTags: mode === 'remove' ? tags : [],
+        remove_tags: mode === 'remove' ? tags : [],
+      })
+      setBatchTagInput("")
+      await useAssetStore.getState().refreshTagsSummary()
+      notifyAssetsRefresh()
+    } catch (err) {
+      console.error("Failed to batch update tags:", err)
+    } finally {
+      setIsBatchMutating(false)
     }
   }
+
+  const runBatchWorkspaceUpdate = async (workspaceId: string, mode: 'add' | 'remove') => {
+    if (!workspaceId || isBatchMutating) return
+    setIsBatchMutating(true)
+    try {
+      await safeInvoke("batch_update_asset_workspaces", {
+        ids: selectedAssets,
+        addWorkspaceIds: mode === 'add' ? [workspaceId] : [],
+        add_workspace_ids: mode === 'add' ? [workspaceId] : [],
+        removeWorkspaceIds: mode === 'remove' ? [workspaceId] : [],
+        remove_workspace_ids: mode === 'remove' ? [workspaceId] : [],
+      })
+      notifyAssetsRefresh()
+    } catch (err) {
+      console.error("Failed to batch update workspaces:", err)
+    } finally {
+      setIsBatchMutating(false)
+    }
+  }
+
+  if (isBatchSelection) {
+    const hotTags = Object.keys(tagsSummary)
+      .sort((a, b) => (tagsSummary[b] || 0) - (tagsSummary[a] || 0))
+      .slice(0, 10)
+
+    return (
+      <aside className={isMobile
+        ? "fixed inset-y-0 right-0 z-40 flex h-full w-[min(20rem,calc(100vw-1rem))] shrink-0 flex-col border-l border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
+        : "flex h-full w-72 shrink-0 flex-col border-l border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
+      }>
+        <div className="p-5 flex-1 overflow-y-auto no-scrollbar space-y-6">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">批量编辑</h2>
+            {isMobile && (
+              <button
+                onClick={toggleRightSidebar}
+                className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+
+          <div className="rounded-md border border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-900/40 px-3 py-2 text-xs text-zinc-600 dark:text-zinc-300">
+            已选择 <span className="font-semibold text-zinc-900 dark:text-zinc-100">{selectedAssets.length}</span> 个资源
+          </div>
+
+          <div>
+            <p className="text-xs text-zinc-500 mb-2">批量标签（逗号分隔）</p>
+            <input
+              type="text"
+              value={batchTagInput}
+              onChange={(e) => setBatchTagInput(e.target.value)}
+              placeholder="例如：封面,已审核"
+              className="w-full px-3 py-1.5 bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-md text-[13px] focus:outline-none focus:border-indigo-500 transition-colors"
+            />
+            <div className="mt-2 flex items-center gap-2">
+              <button
+                onClick={() => runBatchTagUpdate('add')}
+                disabled={isBatchMutating}
+                className="px-2.5 py-1 text-xs rounded-md bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-50 transition-colors"
+              >
+                统一添加标签
+              </button>
+              <button
+                onClick={() => runBatchTagUpdate('remove')}
+                disabled={isBatchMutating}
+                className="px-2.5 py-1 text-xs rounded-md bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-50 transition-colors"
+              >
+                统一移除标签
+              </button>
+            </div>
+            {hotTags.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {hotTags.map((tag) => (
+                  <button
+                    key={tag}
+                    onClick={() => setBatchTagInput((prev) => (prev ? `${prev},${tag}` : tag))}
+                    className="px-2 py-0.5 text-[11px] rounded-md border border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300 hover:border-indigo-400 dark:hover:border-indigo-500/60 transition-colors"
+                  >
+                    {tag}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div>
+            <p className="text-xs text-zinc-500 mb-2">批量工作区</p>
+            <div className="space-y-2">
+              {workspaces.map((ws) => (
+                <div key={ws.id} className="flex items-center justify-between rounded-md border border-zinc-200 dark:border-zinc-800 px-2 py-1.5">
+                  <span className="text-xs text-zinc-700 dark:text-zinc-300 truncate mr-2">{ws.name}</span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => runBatchWorkspaceUpdate(ws.id, 'add')}
+                      disabled={isBatchMutating}
+                      className="px-2 py-0.5 text-[11px] rounded bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-50 transition-colors"
+                    >
+                      加入
+                    </button>
+                    <button
+                      onClick={() => runBatchWorkspaceUpdate(ws.id, 'remove')}
+                      disabled={isBatchMutating}
+                      className="px-2 py-0.5 text-[11px] rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-50 transition-colors"
+                    >
+                      移出
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </aside>
+    )
+  }
+
+  if (!selectedAsset) return null
 
   // Helper to get detail field with fallback
   const detail = assetDetail
