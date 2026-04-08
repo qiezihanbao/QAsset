@@ -6,7 +6,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
 export default defineConfig({
   clearScreen: false,
   server: {
-    port: 5173,
+    port: 4174,
     strictPort: true,
   },
   build: {

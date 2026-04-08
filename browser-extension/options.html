@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QuickAsset 扩展设置</title>
+    <style>
+      :root {
+        --bg: #f5f6f8;
+        --card: #ffffff;
+        --text: #111827;
+        --muted: #6b7280;
+        --border: #d1d5db;
+        --primary: #1f6feb;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      .card {
+        max-width: 760px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 20px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 20px;
+      }
+      p {
+        margin: 0 0 16px;
+        color: var(--muted);
+      }
+      .row {
+        margin-bottom: 14px;
+      }
+      label {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 14px;
+      }
+      .hint {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .actions {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin-top: 18px;
+      }
+      button {
+        border: 0;
+        background: var(--primary);
+        color: white;
+        border-radius: 8px;
+        padding: 9px 14px;
+        cursor: pointer;
+        font-size: 14px;
+      }
+      #status {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      code {
+        background: #eef2ff;
+        border: 1px solid #dbe3ff;
+        border-radius: 6px;
+        padding: 1px 5px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>QuickAsset 扩展设置</h1>
+      <p>右键网页图片后会调用本机服务导入素材库。</p>
+
+      <div class="row">
+        <label for="endpoint">导入接口地址</label>
+        <input id="endpoint" type="text" />
+        <div class="hint">默认值：<code>http://127.0.0.1:27124/api/import-image</code>。连接失败时会自动嗅探本机常见端口。</div>
+      </div>
+
+      <div class="row">
+        <label for="authToken">鉴权 Token（可选）</label>
+        <input id="authToken" type="password" placeholder="未启用可留空" />
+        <div class="hint">若主程序设置了 <code>QUICKASSET_WEB_IMPORT_TOKEN</code>，这里必须填写相同值。</div>
+      </div>
+
+      <div class="actions">
+        <button id="saveBtn">保存设置</button>
+        <span id="status"></span>
+      </div>
+    </div>
+
+    <script src="options.js"></script>
+  </body>
+</html>

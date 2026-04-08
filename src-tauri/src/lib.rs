@@ -4,6 +4,7 @@ mod library;
 mod thumbnails;
 mod scanner;
 mod commands;
+mod web_import;
 
 use library::AppState;
 use tauri::Manager;
@@ -59,6 +60,7 @@ pub fn run() {
                 )?;
             }
             app.manage(AppState::new());
+            web_import::start_web_import_server(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())

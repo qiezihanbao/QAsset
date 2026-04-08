@@ -3,7 +3,7 @@ import { createPortal } from "react-dom"
 import { Menu, Target, CheckSquare, Tags, Trash2, Box, Folder, Plus, ChevronRight, ChevronDown, Check, X, Sparkles, FolderOpen, Settings2, RefreshCw, SunMoon, Sun, Moon } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import { open } from "@tauri-apps/plugin-dialog"
-import { useAssetStore, type ViewType, type Workspace, type RegistryEntry } from "@/store/useAssetStore"
+import { useAssetStore, type ViewType, type Workspace, type RegistryEntry, type ProgressTask } from "@/store/useAssetStore"
 import * as ContextMenu from '@radix-ui/react-context-menu'
 import { isMobile } from "@/lib/utils"
 import { useShallow } from "zustand/react/shallow"
@@ -75,12 +75,12 @@ export function LeftSidebar() {
     assets, workspaces, setWorkspaces, activeWorkspaceId, activeView,
     folderFilter, folderPreviewVisibility, setFolderPreviewVisibility,
     addWorkspace, toggleLeftSidebar, currentLibrary, currentLibraryPath,
-    recentLibraries, setRecentLibraries,
+    recentLibraries, setRecentLibraries, progressTasks,
   ] = useAssetStore(useShallow((s) => ([
     s.assets, s.workspaces, s.setWorkspaces, s.activeWorkspaceId, s.activeView,
     s.folderFilter, s.folderPreviewVisibility, s.setFolderPreviewVisibility,
     s.addWorkspace, s.toggleLeftSidebar, s.currentLibrary, s.currentLibraryPath,
-    s.recentLibraries, s.setRecentLibraries,
+    s.recentLibraries, s.setRecentLibraries, s.progressTasks,
   ])))
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false)
@@ -116,6 +116,19 @@ export function LeftSidebar() {
     ? normalizeFolderPath(folderFilter[0])
     : null
   const isFolderPreviewMode = !!currentFolderNormalized
+  const activeProgressTasks = (Object.values(progressTasks).filter(Boolean) as ProgressTask[])
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+
+  const getProgressPercent = useCallback((task: ProgressTask) => {
+    if (task.total <= 0) return task.status === 'success' ? 100 : 12
+    return Math.max(0, Math.min(100, (task.current / task.total) * 100))
+  }, [])
+
+  const getProgressBarClassName = useCallback((task: ProgressTask) => {
+    if (task.status === 'error') return "h-1.5 rounded-full bg-red-500 transition-all duration-300"
+    if (task.status === 'success') return "h-1.5 rounded-full bg-emerald-500 transition-all duration-300"
+    return "h-1.5 rounded-full bg-indigo-500 transition-all duration-300"
+  }, [])
 
   useEffect(() => {
     if (!currentFolderNormalized) {
@@ -1110,6 +1123,32 @@ export function LeftSidebar() {
           </nav>
         </div>
       </div>
+
+      {activeProgressTasks.length > 0 && (
+        <div className="px-3 pb-2">
+          <div className="space-y-2 rounded-lg border border-zinc-200 bg-white/80 p-2 backdrop-blur-sm dark:border-zinc-800 dark:bg-zinc-900/70">
+            {activeProgressTasks.map((task) => (
+              <div key={task.kind} className="rounded-md border border-zinc-200/70 bg-white/80 p-2 dark:border-zinc-800 dark:bg-zinc-900">
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <span className="truncate text-[11px] font-semibold text-zinc-700 dark:text-zinc-200">{task.title}</span>
+                  <span className="shrink-0 text-[10px] text-zinc-500">
+                    {task.total > 0 ? `${Math.min(task.current, task.total)}/${task.total}` : task.phase}
+                  </span>
+                </div>
+                <div className="mb-1 truncate text-[10px] text-zinc-500 dark:text-zinc-400">
+                  {task.message || '处理中...'}
+                </div>
+                <div className="h-1.5 w-full rounded-full bg-zinc-200 dark:bg-zinc-700">
+                  <div
+                    className={getProgressBarClassName(task)}
+                    style={{ width: `${getProgressPercent(task)}%` }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Bottom Bar */}
       <div className="p-3 border-t border-zinc-200 dark:border-zinc-800 flex items-center justify-between text-zinc-500">

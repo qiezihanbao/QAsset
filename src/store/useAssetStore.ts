@@ -113,6 +113,19 @@ export interface ColorFilter {
   exact: boolean;
 }
 
+export type ProgressTaskKind = 'scan' | 'hash_migrate' | 'web_import'
+
+export interface ProgressTask {
+  kind: ProgressTaskKind
+  title: string
+  phase: string
+  current: number
+  total: number
+  message?: string
+  status: 'running' | 'success' | 'error'
+  updatedAt: number
+}
+
 // ─── Store interface ─────────────────────────────────────────────────
 
 interface AssetStore {
@@ -162,6 +175,7 @@ interface AssetStore {
   layoutMode: "grid" | "masonry" | "canvas"
   sortConfig: SortConfig
   similarAssetIds: string[] | null
+  progressTasks: Record<ProgressTaskKind, ProgressTask | null>
 
   // ── Actions: Assets ──────────────────────────────────────────────
   setAssets: (assets: AssetLite[]) => void
@@ -212,6 +226,11 @@ interface AssetStore {
   setLayoutMode: (mode: "grid" | "masonry" | "canvas") => void
   setSortConfig: (config: SortConfig) => void
   setSimilarAssetIds: (ids: string[] | null) => void
+  upsertProgressTask: (
+    kind: ProgressTaskKind,
+    task: Omit<ProgressTask, 'kind' | 'updatedAt'>
+  ) => void
+  clearProgressTask: (kind: ProgressTaskKind) => void
 }
 
 // ─── Initial pagination ──────────────────────────────────────────────
@@ -272,6 +291,11 @@ export const useAssetStore = create<AssetStore>((set) => ({
   layoutMode: "masonry",
   sortConfig: { field: 'created_at', order: 'desc' },
   similarAssetIds: null,
+  progressTasks: {
+    scan: null,
+    hash_migrate: null,
+    web_import: null,
+  },
 
   // ── Actions: Assets ──────────────────────────────────────────────
   setAssets: (assets) => set({ assets }),
@@ -322,6 +346,11 @@ export const useAssetStore = create<AssetStore>((set) => ({
     activeView: "all",
     activeWorkspaceId: null,
     pagination: initialPagination,
+    progressTasks: {
+      scan: null,
+      hash_migrate: null,
+      web_import: null,
+    },
   }),
 
   // ── Actions: Workspaces ──────────────────────────────────────────
@@ -388,4 +417,20 @@ export const useAssetStore = create<AssetStore>((set) => ({
   setLayoutMode: (mode) => set({ layoutMode: mode }),
   setSortConfig: (config) => set({ sortConfig: config }),
   setSimilarAssetIds: (ids) => set({ similarAssetIds: ids }),
+  upsertProgressTask: (kind, task) => set((state) => ({
+    progressTasks: {
+      ...state.progressTasks,
+      [kind]: {
+        ...task,
+        kind,
+        updatedAt: Date.now(),
+      },
+    },
+  })),
+  clearProgressTask: (kind) => set((state) => ({
+    progressTasks: {
+      ...state.progressTasks,
+      [kind]: null,
+    },
+  })),
 }))

@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event"
 import { MainLayout } from "@/components/layout/MainLayout"
 import { WindowTitleBar } from "@/components/layout/WindowTitleBar"
 import { AssetsPage } from "@/pages/AssetsPage"
-import { useAssetStore, type LibraryConfig, type RegistryEntry } from "@/store/useAssetStore"
+import { useAssetStore, type LibraryConfig, type RegistryEntry, type ProgressTaskKind } from "@/store/useAssetStore"
 import { useTheme } from "@/hooks/useTheme"
 
 const RightSidebar = lazy(() =>
@@ -33,6 +33,24 @@ const hasTauriRuntime = () => {
   return Boolean(w.__TAURI_INTERNALS__ || w.__TAURI__)
 }
 
+interface ScanProgressEvent {
+  phase: string
+  scanned: number
+  total: number
+}
+
+interface MigrateProgressEvent {
+  migrated: number
+  total: number
+}
+
+interface WebImportProgressEvent {
+  phase: string
+  step: number
+  total: number
+  message?: string
+}
+
 function App() {
   useTheme()
 
@@ -44,10 +62,12 @@ function App() {
   const resetForNewLibrary = useAssetStore((s) => s.resetForNewLibrary)
   const isRightSidebarVisible = useAssetStore((s) => s.isRightSidebarVisible)
   const activeView = useAssetStore((s) => s.activeView)
+  const upsertProgressTask = useAssetStore((s) => s.upsertProgressTask)
+  const clearProgressTask = useAssetStore((s) => s.clearProgressTask)
 
   const [isInitialized, setIsInitialized] = useState(false)
-  const [migrateProgress, setMigrateProgress] = useState<{ migrated: number; total: number } | null>(null)
   const fsEventTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const progressClearTimersRef = useRef<Partial<Record<ProgressTaskKind, ReturnType<typeof setTimeout>>>>({})
 
   const loadAssets = useCallback(async () => {
     window.dispatchEvent(new Event('quickasset:refresh-assets'))
@@ -177,9 +197,26 @@ function App() {
     window.addEventListener('keydown', handleKeyDown);
 
     // File Drop Handler
+    const clearProgressTimer = (kind: ProgressTaskKind) => {
+      const existing = progressClearTimersRef.current[kind]
+      if (existing) {
+        clearTimeout(existing)
+        delete progressClearTimersRef.current[kind]
+      }
+    }
+    const scheduleProgressClear = (kind: ProgressTaskKind, delayMs: number) => {
+      clearProgressTimer(kind)
+      progressClearTimersRef.current[kind] = setTimeout(() => {
+        clearProgressTask(kind)
+        delete progressClearTimersRef.current[kind]
+      }, delayMs)
+    }
+
     let unlistenDrop: (() => void) | undefined;
     let unlistenFs: (() => void) | undefined;
     let unlistenMigrate: (() => void) | undefined;
+    let unlistenScan: (() => void) | undefined;
+    let unlistenWebImport: (() => void) | undefined;
 
     if (hasTauriRuntime()) {
       try {
@@ -213,14 +250,80 @@ function App() {
         }).then(u => unlistenFs = u);
 
         // Hash migration progress listener
-        listen<{ migrated: number; total: number }>('migrate-progress', (event) => {
+        listen<MigrateProgressEvent>('migrate-progress', (event) => {
           const payload = event.payload
-          setMigrateProgress(payload)
-          // Clear progress when done
-          if (payload.migrated >= payload.total) {
-            setTimeout(() => setMigrateProgress(null), 2000)
+          const current = Math.max(0, Number(payload?.migrated || 0))
+          const total = Math.max(0, Number(payload?.total || 0))
+          upsertProgressTask('hash_migrate', {
+            title: '重建图片哈希',
+            phase: current >= total && total > 0 ? 'done' : 'processing',
+            current,
+            total,
+            message: total > 0 ? `已处理 ${Math.min(current, total)} / ${total}` : '准备中...',
+            status: current >= total && total > 0 ? 'success' : 'running',
+          })
+          if (total > 0 && current >= total) {
+            scheduleProgressClear('hash_migrate', 2200)
           }
         }).then(u => unlistenMigrate = u);
+
+        // Library scan progress listener
+        listen<ScanProgressEvent>('scan-progress', (event) => {
+          const payload = event.payload
+          const phase = String(payload?.phase || '')
+          const current = Math.max(0, Number(payload?.scanned || 0))
+          const total = Math.max(0, Number(payload?.total || 0))
+          const phaseLabelMap: Record<string, string> = {
+            discovering: '扫描文件',
+            diffing: '比对变更',
+            processing: '重建图片哈希与缩略图',
+            writing: '写入数据库与索引',
+            done: '扫描完成',
+          }
+          const message = phaseLabelMap[phase] || '处理中'
+          const done = phase === 'done'
+          upsertProgressTask('scan', {
+            title: '素材库扫描',
+            phase,
+            current,
+            total,
+            message,
+            status: done ? 'success' : 'running',
+          })
+          if (done) {
+            scheduleProgressClear('scan', 2200)
+          }
+        }).then(u => unlistenScan = u)
+
+        // Browser web-import progress listener
+        listen<WebImportProgressEvent>('web-import-progress', (event) => {
+          const payload = event.payload
+          const phase = String(payload?.phase || '')
+          const current = Math.max(0, Number(payload?.step || 0))
+          const total = Math.max(0, Number(payload?.total || 0))
+          const phaseLabelMap: Record<string, string> = {
+            downloading: '下载图片',
+            processing: '处理图片哈希',
+            indexing: '写入素材库',
+            done: '导入完成',
+            failed: '导入失败',
+          }
+          const status: 'running' | 'success' | 'error' =
+            phase === 'done' ? 'success' : phase === 'failed' ? 'error' : 'running'
+          upsertProgressTask('web_import', {
+            title: '浏览器图片导入',
+            phase,
+            current,
+            total,
+            message: payload?.message || phaseLabelMap[phase] || '处理中',
+            status,
+          })
+          if (phase === 'done') {
+            scheduleProgressClear('web_import', 2200)
+          } else if (phase === 'failed') {
+            scheduleProgressClear('web_import', 4500)
+          }
+        }).then(u => unlistenWebImport = u)
 
       } catch (e) {
         console.warn("Tauri listeners failed to attach.", e);
@@ -234,11 +337,16 @@ function App() {
       if (unlistenDrop) unlistenDrop();
       if (unlistenFs) unlistenFs();
       if (unlistenMigrate) unlistenMigrate();
+      if (unlistenScan) unlistenScan();
+      if (unlistenWebImport) unlistenWebImport();
       if (fsEventTimerRef.current) {
         clearTimeout(fsEventTimerRef.current)
       }
+      clearProgressTimer('scan')
+      clearProgressTimer('hash_migrate')
+      clearProgressTimer('web_import')
     }
-  }, [lightweightRefresh, loadAssets]);
+  }, [clearProgressTask, lightweightRefresh, loadAssets, upsertProgressTask]);
 
   // Loading state
   if (isLoadingLibrary) {
@@ -284,28 +392,6 @@ function App() {
           </Suspense>
         )}
       </div>
-
-      {/* Hash Migration Progress Bar */}
-      {migrateProgress && migrateProgress.total > 0 && (
-        <div className="fixed bottom-0 left-0 right-0 z-50 px-4 pb-4">
-          <div className="max-w-md mx-auto bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-lg p-3">
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                正在迁移图片哈希...
-              </span>
-              <span className="text-xs text-zinc-500">
-                {migrateProgress.migrated}/{migrateProgress.total}
-              </span>
-            </div>
-            <div className="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-1.5">
-              <div
-                className="bg-indigo-500 h-1.5 rounded-full transition-all duration-300"
-                style={{ width: `${(migrateProgress.migrated / migrateProgress.total) * 100}%` }}
-              />
-            </div>
-          </div>
-        </div>
-      )}
     </MainLayout>
   )
 }
