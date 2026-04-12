@@ -4,7 +4,7 @@ import * as ContextMenu from '@radix-ui/react-context-menu'
 import { invoke } from "@tauri-apps/api/core"
 import { convertFileSrc } from "@tauri-apps/api/core"
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useRef, useMemo, useEffect, useState, useCallback, lazy, Suspense } from 'react'
+import { useRef, useMemo, useEffect, useState, useCallback, lazy, Suspense, startTransition } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import Selecto from "react-selecto"
 
@@ -40,10 +40,122 @@ const isTauri = () => {
 }
 const THUMBNAIL_FIRST_EXTENSIONS = new Set(['psd', 'psb', 'clip'])
 const SEARCH_DEBOUNCE_MS = 250
-const INCREMENTAL_PAGE_SIZE = 300
+const INCREMENTAL_PAGE_SIZE = 120
 const FULL_FETCH_PAGE_SIZE = 10000
 const LOAD_MORE_THRESHOLD_PX = 900
 const CUSTOM_SORT_FALLBACK_RANK = Number.MAX_SAFE_INTEGER
+const PAGE_COMMIT_CHUNK_SIZE = 24
+const REPLACE_COMMIT_CHUNK_THRESHOLD = 300
+const THUMBNAIL_ENSURE_CONCURRENCY = 2
+const SCROLL_PREDICT_MS = 500
+const FAST_SCROLL_PX_PER_MS = 1.2
+const MAX_FAST_PREFETCH_PAGES = 2
+const OVERSCAN_RATIO = 0.4
+const MIN_PRIORITY_PRELOAD_COUNT = 18
+const MAX_PRIORITY_PRELOAD_COUNT = 36
+const IDLE_PRELOAD_MULTIPLIER = 2
+const IDLE_PRELOAD_BATCH_SIZE = 6
+const ACTIVE_SCROLL_IDLE_PRELOAD_THRESHOLD = 0.2
+const BACKEND_PREFETCH_MIN_INTERVAL_MS = 80
+const BACKEND_PREFETCH_LEAD_MULTIPLIER = 1.25
+const BACKEND_PREFETCH_MAX_LEAD_IDS = 96
+const QA_DND_ASSET_MIME = "application/x-quickasset-assets"
+
+function readDraggedAssetIds(dataTransfer: DataTransfer | null): string[] {
+  if (!dataTransfer) return []
+  const raw = dataTransfer.getData(QA_DND_ASSET_MIME)
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as { assetIds?: unknown }
+    if (!Array.isArray(parsed.assetIds)) return []
+    const unique = new Set<string>()
+    for (const item of parsed.assetIds) {
+      if (typeof item !== "string") continue
+      const trimmed = item.trim()
+      if (!trimmed) continue
+      unique.add(trimmed)
+    }
+    return Array.from(unique)
+  } catch {
+    return []
+  }
+}
+
+const nextAnimationFrame = () => new Promise<void>((resolve) => {
+  window.requestAnimationFrame(() => resolve())
+})
+
+let thumbnailEnsureActiveCount = 0
+const thumbnailEnsureWaiters: Array<() => void> = []
+const thumbnailEnsureInFlight = new Map<string, Promise<string | null | undefined>>()
+const resolvedThumbnailPathCache = new Map<string, string>()
+const preloadedCardImageSrcCache = new Set<string>()
+
+const scheduleIdleTask = (callback: () => void): number => {
+  const idleWindow = window as Window & {
+    requestIdleCallback?: (cb: () => void, options?: { timeout: number }) => number
+  }
+  if (typeof idleWindow.requestIdleCallback === 'function') {
+    return idleWindow.requestIdleCallback(callback, { timeout: 250 })
+  }
+  return window.setTimeout(callback, 32)
+}
+
+const cancelIdleTask = (taskId: number) => {
+  const idleWindow = window as Window & { cancelIdleCallback?: (id: number) => void }
+  if (typeof idleWindow.cancelIdleCallback === 'function') {
+    idleWindow.cancelIdleCallback(taskId)
+    return
+  }
+  window.clearTimeout(taskId)
+}
+
+const preloadCardImageSrc = (src: string) => {
+  if (!src || preloadedCardImageSrcCache.has(src)) return
+  preloadedCardImageSrcCache.add(src)
+  const img = document.createElement('img')
+  img.decoding = 'async'
+  img.src = src
+}
+
+const acquireThumbnailEnsureSlot = async () => {
+  if (thumbnailEnsureActiveCount < THUMBNAIL_ENSURE_CONCURRENCY) {
+    thumbnailEnsureActiveCount += 1
+    return
+  }
+  await new Promise<void>((resolve) => {
+    thumbnailEnsureWaiters.push(resolve)
+  })
+  thumbnailEnsureActiveCount += 1
+}
+
+const releaseThumbnailEnsureSlot = () => {
+  thumbnailEnsureActiveCount = Math.max(0, thumbnailEnsureActiveCount - 1)
+  const next = thumbnailEnsureWaiters.shift()
+  if (next) next()
+}
+
+const ensureAssetThumbnailQueued = async (assetId: string) => {
+  const inFlightTask = thumbnailEnsureInFlight.get(assetId)
+  if (inFlightTask) {
+    return inFlightTask
+  }
+
+  const task = (async () => {
+    await acquireThumbnailEnsureSlot()
+    try {
+      return await safeInvoke<string | null>("ensure_asset_thumbnail", { id: assetId })
+    } finally {
+      releaseThumbnailEnsureSlot()
+    }
+  })()
+
+  thumbnailEnsureInFlight.set(assetId, task)
+  task.finally(() => {
+    thumbnailEnsureInFlight.delete(assetId)
+  })
+  return task
+}
 
 function hashStringWithSeed(input: string, seed: number): number {
   let hash = seed | 0
@@ -51,6 +163,10 @@ function hashStringWithSeed(input: string, seed: number): number {
     hash = ((hash << 5) - hash + input.charCodeAt(i)) | 0
   }
   return hash >>> 0
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
 }
 
 interface QueryAssetsResult {
@@ -63,6 +179,8 @@ interface AssetCardProps {
   isSelected: boolean
   layoutMode: "grid" | "masonry" | "canvas"
   workspaces: Workspace[]
+  dragAssetIds?: string[]
+  priority?: boolean
   onSelect: (e: React.MouseEvent) => void
   onContextMenu: () => void
   onPreview: () => void
@@ -87,9 +205,10 @@ function getCardImageSrc(asset: AssetLite, overrideThumbnailPath?: string | null
     return thumbnailPath ? convertFileSrc(thumbnailPath) : null
   }
   const ext = getFileExt(asset.name || asset.path)
-  const preferThumbnail = THUMBNAIL_FIRST_EXTENSIONS.has(ext)
-  const filePath = preferThumbnail ? (thumbnailPath || asset.path) : asset.path
-  return filePath ? convertFileSrc(filePath) : null
+  if (asset.asset_type === 'image' || THUMBNAIL_FIRST_EXTENSIONS.has(ext)) {
+    return (thumbnailPath || asset.path) ? convertFileSrc(thumbnailPath || asset.path) : null
+  }
+  return asset.path ? convertFileSrc(asset.path) : null
 }
 
 function getFolderPreviewSrc(folder: FolderInfo): string | null {
@@ -164,11 +283,13 @@ function getAssetIcon(type: string) {
   }
 }
 
-function AssetCard({ asset, isSelected, layoutMode, workspaces, onSelect, onContextMenu, onPreview, onShowInFolder, onPreviewFolder, onSearchSimilar, onDelete, onAssignWorkspace, onQuickAddTag, activeView }: AssetCardProps) {
-  const [resolvedThumbnailPath, setResolvedThumbnailPath] = useState<string | null>(asset.thumbnail_path || null)
+function AssetCard({ asset, isSelected, layoutMode, workspaces, dragAssetIds, priority = false, onSelect, onContextMenu, onPreview, onShowInFolder, onPreviewFolder, onSearchSimilar, onDelete, onAssignWorkspace, onQuickAddTag, activeView }: AssetCardProps) {
+  const [resolvedThumbnailPath, setResolvedThumbnailPath] = useState<string | null>(() => (
+    asset.thumbnail_path || resolvedThumbnailPathCache.get(asset.id) || null
+  ))
 
   useEffect(() => {
-    setResolvedThumbnailPath(asset.thumbnail_path || null)
+    setResolvedThumbnailPath(asset.thumbnail_path || resolvedThumbnailPathCache.get(asset.id) || null)
   }, [asset.id, asset.thumbnail_path])
 
   useEffect(() => {
@@ -179,10 +300,11 @@ function AssetCard({ asset, isSelected, layoutMode, workspaces, onSelect, onCont
     if (resolvedThumbnailPath) return
 
     let cancelled = false
-    safeInvoke("ensure_asset_thumbnail", { id: asset.id })
+    ensureAssetThumbnailQueued(asset.id)
       .then((thumbnailPath) => {
         if (cancelled) return
         if (typeof thumbnailPath === 'string' && thumbnailPath.length > 0) {
+          resolvedThumbnailPathCache.set(asset.id, thumbnailPath)
           setResolvedThumbnailPath(thumbnailPath)
         }
       })
@@ -232,13 +354,28 @@ function AssetCard({ asset, isSelected, layoutMode, workspaces, onSelect, onCont
   const isImageAsset = asset.asset_type === 'image' || THUMBNAIL_FIRST_EXTENSIONS.has(ext)
   const imageSrc = getCardImageSrc(asset, resolvedThumbnailPath)
   const hasVisualPreview = !!imageSrc && (isImageAsset || asset.asset_type === 'video')
+  const previewAspectRatio = (() => {
+    if (layoutMode === 'grid') return 1
+    const safeWidth = Math.max(1, asset.width || 1)
+    const safeHeight = Math.max(1, asset.height || 1)
+    const ratio = safeWidth / safeHeight
+    return Math.min(4, Math.max(0.25, ratio))
+  })()
+
+  const handleDragStart = (event: React.DragEvent<HTMLDivElement>) => {
+    const ids = dragAssetIds && dragAssetIds.length > 0 ? Array.from(new Set(dragAssetIds)) : [asset.id]
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData(QA_DND_ASSET_MIME, JSON.stringify({ assetIds: ids }))
+  }
 
   return (
     <ContextMenu.Root>
       <ContextMenu.Trigger onContextMenu={onContextMenu}>
         <div
           data-id={asset.id}
+          draggable
           onClick={onSelect}
+          onDragStart={handleDragStart}
           onDoubleClick={(e) => {
             e.preventDefault()
             e.stopPropagation()
@@ -253,25 +390,27 @@ function AssetCard({ asset, isSelected, layoutMode, workspaces, onSelect, onCont
           }`}>
             <div className={`w-full flex items-center justify-center ${!hasVisualPreview ? getAssetColor(asset.asset_type) : ''} bg-zinc-100 dark:bg-zinc-900 bg-opacity-10 dark:bg-opacity-10`}>
               {hasVisualPreview ? (
-                <img
+                <div className="w-full overflow-hidden" style={{ aspectRatio: previewAspectRatio }}>
+                  <img
                   src={imageSrc}
                   alt={asset.name}
-                  loading="lazy"
+                  loading={priority ? 'eager' : 'lazy'}
                   decoding="async"
-                  className={`w-full ${layoutMode === 'grid' ? 'aspect-square object-cover' : 'h-auto object-contain'} transition-opacity duration-300`}
-                  onError={(e) => {
-                    // Hide broken images and show fallback
-                    (e.target as HTMLImageElement).style.display = 'none'
-                    const parent = (e.target as HTMLImageElement).parentElement
-                    if (parent) {
-                      parent.classList.add(getAssetColor(asset.asset_type).split(' ')[0])
-                      const fallback = document.createElement('div')
-                      fallback.className = 'py-12'
-                      fallback.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`
-                      parent.appendChild(fallback)
-                    }
-                  }}
-                />
+                    className={`h-full w-full ${layoutMode === 'grid' ? 'object-cover' : 'object-contain'} transition-opacity duration-300`}
+                    onError={(e) => {
+                      // Hide broken images and show fallback
+                      (e.target as HTMLImageElement).style.display = 'none'
+                      const parent = (e.target as HTMLImageElement).parentElement
+                      if (parent) {
+                        parent.classList.add(getAssetColor(asset.asset_type).split(' ')[0])
+                        const fallback = document.createElement('div')
+                        fallback.className = 'py-12'
+                        fallback.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`
+                        parent.appendChild(fallback)
+                      }
+                    }}
+                  />
+                </div>
               ) : (
                 <div className="py-12">{getAssetIcon(asset.asset_type)}</div>
               )}
@@ -464,7 +603,7 @@ export function AssetsPage() {
     activeView, activeWorkspaceId, setActiveView, workspaces, thumbnailSize, setThumbnailSize, layoutMode, setLayoutMode,
     sortConfig, setSortConfig, similarAssetIds, setSimilarAssetIds, setPreviewAsset,
     removeAsset, updateAssetProperty, assetDetail, setAssets, appendAssets, setAssetDetail, currentLibraryPath,
-    pagination, setPagination, tagsSummary, refreshTagsSummary,
+    pagination, setPagination, tagsSummary, refreshTagsSummary, isLeftSidebarVisible, isRightSidebarVisible,
   ] = useAssetStore(useShallow((s) => ([
     s.assets, s.setSelectedAssets, s.selectedAssets, s.searchQuery, s.setSearchQuery,
     s.colorFilter, s.setColorFilter, s.typeFilter, s.setTypeFilter, s.tagFilter, s.setTagFilter,
@@ -474,7 +613,7 @@ export function AssetsPage() {
     s.activeView, s.activeWorkspaceId, s.setActiveView, s.workspaces, s.thumbnailSize, s.setThumbnailSize, s.layoutMode, s.setLayoutMode,
     s.sortConfig, s.setSortConfig, s.similarAssetIds, s.setSimilarAssetIds, s.setPreviewAsset,
     s.removeAsset, s.updateAssetProperty, s.assetDetail, s.setAssets, s.appendAssets, s.setAssetDetail, s.currentLibraryPath,
-    s.pagination, s.setPagination, s.tagsSummary, s.refreshTagsSummary,
+    s.pagination, s.setPagination, s.tagsSummary, s.refreshTagsSummary, s.isLeftSidebarVisible, s.isRightSidebarVisible,
   ])))
 
   const [isColorPickerOpen, setIsColorPickerOpen] = useState(false)
@@ -495,11 +634,22 @@ export function AssetsPage() {
     heightMax: '',
   })
   const [folders, setFolders] = useState<FolderInfo[]>([])
+  const [folderDropHighlightPath, setFolderDropHighlightPath] = useState<string | null>(null)
   const [refreshVersion, setRefreshVersion] = useState(0)
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState(searchQuery)
   const [isLoadingPage, setIsLoadingPage] = useState(false)
   const queryTokenRef = useRef(0)
   const loadingPageRef = useRef(false)
+  const pendingLoadAheadRef = useRef(0)
+  const lastScrollTopRef = useRef(0)
+  const lastScrollTimeRef = useRef(0)
+  const scrollVelocityRef = useRef(0)
+  const warmPrefetchTokenRef = useRef(0)
+  const idlePreloadTokenRef = useRef(0)
+  const backendPrefetchTaskIdRef = useRef('assets-window-prefetch')
+  const backendPrefetchRafRef = useRef<number | null>(null)
+  const backendPrefetchSignatureRef = useRef('')
+  const backendPrefetchLastRunRef = useRef(0)
   const sortMenuRef = useRef<HTMLDivElement>(null)
 
   const triggerRefresh = useCallback(() => {
@@ -511,6 +661,19 @@ export function AssetsPage() {
     window.addEventListener('quickasset:refresh-assets', onExternalRefresh)
     return () => window.removeEventListener('quickasset:refresh-assets', onExternalRefresh)
   }, [triggerRefresh])
+
+  useEffect(() => {
+    return () => {
+      if (backendPrefetchRafRef.current !== null) {
+        window.cancelAnimationFrame(backendPrefetchRafRef.current)
+        backendPrefetchRafRef.current = null
+      }
+      void safeInvoke('cancel_prefetch_task', {
+        taskId: backendPrefetchTaskIdRef.current,
+        task_id: backendPrefetchTaskIdRef.current,
+      })
+    }
+  }, [])
 
   useEffect(() => {
     if (!isSortOpen) return
@@ -533,6 +696,7 @@ export function AssetsPage() {
   // Virtualization Logic for Grid Mode
   const parentRef = useRef<HTMLDivElement>(null)
   const [containerWidth, setContainerWidth] = useState(1000)
+  const [containerHeight, setContainerHeight] = useState(900)
 
   // Track container width reactively with ResizeObserver
   useEffect(() => {
@@ -541,16 +705,25 @@ export function AssetsPage() {
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const nextWidth = Math.round(entry.contentRect.width)
+        const nextHeight = Math.round(entry.contentRect.height)
         if (nextWidth > 1) {
           setContainerWidth(nextWidth)
-          continue
+        } else {
+          // Guard against transient zero-width reports (can happen after blocking dialogs
+          // or heavy UI updates) which would force the grid into a single-column layout.
+          const fallback = parentRef.current?.clientWidth ?? 0
+          if (fallback > 1) {
+            setContainerWidth(fallback)
+          }
         }
 
-        // Guard against transient zero-width reports (can happen after blocking dialogs
-        // or heavy UI updates) which would force the grid into a single-column layout.
-        const fallback = parentRef.current?.clientWidth ?? 0
-        if (fallback > 1) {
-          setContainerWidth(fallback)
+        if (nextHeight > 1) {
+          setContainerHeight(nextHeight)
+        } else {
+          const fallbackHeight = parentRef.current?.clientHeight ?? 0
+          if (fallbackHeight > 1) {
+            setContainerHeight(fallbackHeight)
+          }
         }
       }
     })
@@ -599,11 +772,12 @@ export function AssetsPage() {
         await safeInvoke("delete_assets", { ids: [id] })
         removeAsset(id)
       } else {
-        updateAssetProperty(id, { is_trashed: true })
+        const nextIsTrashed = activeView !== 'trash'
+        updateAssetProperty(id, { is_trashed: nextIsTrashed })
         await safeInvoke("update_asset", {
           id,
-          isTrashed: true,
-          is_trashed: true,
+          isTrashed: nextIsTrashed,
+          is_trashed: nextIsTrashed,
         })
       }
       triggerRefresh()
@@ -627,7 +801,8 @@ export function AssetsPage() {
         threshold: 15
       })
       if (Array.isArray(similarIds)) {
-        setSimilarAssetIds([id, ...similarIds])
+        const deduped = Array.from(new Set([id, ...similarIds]))
+        setSimilarAssetIds(deduped)
       }
     } catch (err) {
       console.error("Failed to search similar images:", err)
@@ -765,8 +940,9 @@ export function AssetsPage() {
     dimensionBounds.widthMax !== null ||
     dimensionBounds.heightMin !== null ||
     dimensionBounds.heightMax !== null
+  const isSimilarSearchActive = !!similarAssetIds
   const hasClientOnlyFilters =
-    !!similarAssetIds ||
+    isSimilarSearchActive ||
     !!colorFilter ||
     !!(sizeFilter && sizeFilter.length > 0) ||
     !!(ratingFilter && ratingFilter.length > 0) ||
@@ -778,7 +954,13 @@ export function AssetsPage() {
     () => (similarAssetIds ? new Set(similarAssetIds) : null),
     [similarAssetIds]
   )
-  const effectivePageSize = hasClientOnlyFilters ? FULL_FETCH_PAGE_SIZE : INCREMENTAL_PAGE_SIZE
+  const effectivePageSize = hasClientOnlyFilters
+    ? (
+        isSimilarSearchActive
+          ? Math.max(FULL_FETCH_PAGE_SIZE, pagination.totalCount || 0)
+          : FULL_FETCH_PAGE_SIZE
+      )
+    : INCREMENTAL_PAGE_SIZE
   const normalizedLibraryPath = (currentLibraryPath || 'no-library').replace(/\\/g, '/')
   const canvasScope = currentFolderPath
     ? `folder:${currentFolderPath}`
@@ -827,6 +1009,46 @@ export function AssetsPage() {
     triggerRefresh()
   }
 
+  const moveDraggedAssetsToFolder = useCallback(async (assetIds: string[], targetFolderPath: string) => {
+    if (assetIds.length === 0) return
+    const normalizedTarget = normalizeFolderPath(targetFolderPath)
+    try {
+      await safeInvoke("move_assets_to_folder", {
+        assetIds,
+        targetFolder: normalizedTarget,
+        asset_ids: assetIds,
+        target_folder: normalizedTarget,
+      })
+      window.dispatchEvent(new Event('quickasset:refresh-assets'))
+    } catch (error) {
+      console.error("Failed to move dragged assets:", error)
+      alert(`移动文件失败: ${String(error)}`)
+    }
+  }, [normalizeFolderPath])
+
+  const handleFolderCardDragOver = useCallback((event: React.DragEvent<HTMLButtonElement>, folderPath: string) => {
+    const assetIds = readDraggedAssetIds(event.dataTransfer)
+    if (assetIds.length === 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = 'move'
+    setFolderDropHighlightPath(normalizeFolderPath(folderPath))
+  }, [normalizeFolderPath])
+
+  const handleFolderCardDragLeave = useCallback((event: React.DragEvent<HTMLButtonElement>) => {
+    event.stopPropagation()
+    setFolderDropHighlightPath(null)
+  }, [])
+
+  const handleFolderCardDrop = useCallback(async (event: React.DragEvent<HTMLButtonElement>, folderPath: string) => {
+    event.preventDefault()
+    event.stopPropagation()
+    setFolderDropHighlightPath(null)
+    const assetIds = readDraggedAssetIds(event.dataTransfer)
+    if (assetIds.length === 0) return
+    await moveDraggedAssetsToFolder(assetIds, folderPath)
+  }, [moveDraggedAssetsToFolder])
+
   useEffect(() => {
     if (layoutMode === 'canvas' && !isCanvasEnabled) {
       setLayoutMode('masonry')
@@ -834,6 +1056,7 @@ export function AssetsPage() {
   }, [layoutMode, isCanvasEnabled, setLayoutMode])
 
   const queryFilters = useMemo((): Partial<AssetFilters> => {
+    const isSimilarScope = !!similarAssetIds
     const hasFolderPreview = !!(folderFilter && folderFilter.length > 0)
     const backendSortField = (sortConfig.field === 'random' || sortConfig.field === 'custom')
       ? 'created_at'
@@ -841,35 +1064,35 @@ export function AssetsPage() {
     const filters: Partial<AssetFilters> = {
       sort_field: backendSortField,
       sort_order: sortConfig.order,
-      is_trashed: hasFolderPreview ? false : activeView === 'trash' ? true : false,
+      is_trashed: isSimilarScope ? undefined : (hasFolderPreview ? false : activeView === 'trash' ? true : false),
     }
 
-    if (!hasFolderPreview && activeView === 'unorganized') {
+    if (!isSimilarScope && !hasFolderPreview && activeView === 'unorganized') {
       filters.unorganized = true
     }
 
-    if (tagFilter && tagFilter.length > 0) {
+    if (!isSimilarScope && tagFilter && tagFilter.length > 0) {
       filters.tags = tagFilter
     }
 
-    if (!hasFolderPreview && activeView === 'workspace' && activeWorkspaceId) {
+    if (!isSimilarScope && !hasFolderPreview && activeView === 'workspace' && activeWorkspaceId) {
       filters.workspace_id = activeWorkspaceId
     }
 
-    if (typeFilter && typeFilter.length > 0) {
+    if (!isSimilarScope && typeFilter && typeFilter.length > 0) {
       filters.asset_types = typeFilter
     }
 
-    if (folderFilter && folderFilter.length > 0) {
+    if (!isSimilarScope && folderFilter && folderFilter.length > 0) {
       filters.folder_path = folderFilter[0]
     }
 
-    if (debouncedSearchQuery) {
+    if (!isSimilarScope && debouncedSearchQuery) {
       filters.search_query = debouncedSearchQuery
     }
 
     return filters
-  }, [activeView, activeWorkspaceId, debouncedSearchQuery, folderFilter, sortConfig, tagFilter, typeFilter])
+  }, [activeView, activeWorkspaceId, debouncedSearchQuery, folderFilter, similarAssetIds, sortConfig, tagFilter, typeFilter])
 
   useEffect(() => {
     if (!isTauri()) return
@@ -887,6 +1110,46 @@ export function AssetsPage() {
     }
     loadFolders()
   }, [currentLibraryPath, refreshVersion])
+
+  const commitPageItems = useCallback(async (
+    items: AssetLite[],
+    mode: 'replace' | 'append',
+    token: number,
+  ) => {
+    if (token !== queryTokenRef.current) return
+    if (items.length === 0) {
+      if (mode === 'replace') {
+        setAssets([])
+      }
+      return
+    }
+
+    if (mode === 'replace' && items.length <= REPLACE_COMMIT_CHUNK_THRESHOLD) {
+      startTransition(() => {
+        setAssets(items)
+      })
+      return
+    }
+
+    const firstChunk = items.slice(0, PAGE_COMMIT_CHUNK_SIZE)
+    if (mode === 'replace') {
+      startTransition(() => {
+        setAssets(firstChunk)
+      })
+    } else {
+      startTransition(() => {
+        appendAssets(firstChunk)
+      })
+    }
+
+    for (let index = PAGE_COMMIT_CHUNK_SIZE; index < items.length; index += PAGE_COMMIT_CHUNK_SIZE) {
+      await nextAnimationFrame()
+      if (token !== queryTokenRef.current) return
+      startTransition(() => {
+        appendAssets(items.slice(index, index + PAGE_COMMIT_CHUNK_SIZE))
+      })
+    }
+  }, [appendAssets, setAssets])
 
   const loadPage = useCallback(async (page: number, mode: 'replace' | 'append', token: number) => {
     if (!isTauri()) return
@@ -906,11 +1169,8 @@ export function AssetsPage() {
 
       if (token !== queryTokenRef.current) return
 
-      if (mode === 'replace') {
-        setAssets(result.items)
-      } else {
-        appendAssets(result.items)
-      }
+      await commitPageItems(result.items, mode, token)
+      if (token !== queryTokenRef.current) return
 
       const loadedCount = previousCount + result.items.length
       const previousPagination = useAssetStore.getState().pagination
@@ -936,11 +1196,27 @@ export function AssetsPage() {
         loadingPageRef.current = false
       }
     }
-  }, [appendAssets, effectivePageSize, queryFilters, setAssets, setPagination])
+  }, [commitPageItems, effectivePageSize, queryFilters, setPagination])
 
   useEffect(() => {
     if (!isTauri()) return
     if (!currentLibraryPath) {
+      if (backendPrefetchRafRef.current !== null) {
+        window.cancelAnimationFrame(backendPrefetchRafRef.current)
+        backendPrefetchRafRef.current = null
+      }
+      backendPrefetchSignatureRef.current = ''
+      void safeInvoke('cancel_prefetch_task', {
+        taskId: backendPrefetchTaskIdRef.current,
+        task_id: backendPrefetchTaskIdRef.current,
+      })
+      pendingLoadAheadRef.current = 0
+      lastScrollTopRef.current = 0
+      lastScrollTimeRef.current = 0
+      scrollVelocityRef.current = 0
+      warmPrefetchTokenRef.current = 0
+      idlePreloadTokenRef.current = 0
+      backendPrefetchLastRunRef.current = 0
       setAssets([])
       setPagination({
         page: 1,
@@ -953,7 +1229,23 @@ export function AssetsPage() {
 
     const token = queryTokenRef.current + 1
     queryTokenRef.current = token
+    if (backendPrefetchRafRef.current !== null) {
+      window.cancelAnimationFrame(backendPrefetchRafRef.current)
+      backendPrefetchRafRef.current = null
+    }
+    backendPrefetchSignatureRef.current = ''
+    void safeInvoke('cancel_prefetch_task', {
+      taskId: backendPrefetchTaskIdRef.current,
+      task_id: backendPrefetchTaskIdRef.current,
+    })
     loadingPageRef.current = false
+    pendingLoadAheadRef.current = 0
+    lastScrollTopRef.current = 0
+    lastScrollTimeRef.current = 0
+    scrollVelocityRef.current = 0
+    warmPrefetchTokenRef.current = 0
+    idlePreloadTokenRef.current = 0
+    backendPrefetchLastRunRef.current = 0
     setPagination({
       page: 1,
       pageSize: effectivePageSize,
@@ -971,19 +1263,101 @@ export function AssetsPage() {
     void loadPage(pagination.page + 1, 'append', token)
   }, [isLoadingPage, loadPage, pagination.hasMore, pagination.page])
 
+  const dynamicLoadMoreThreshold = useMemo(() => {
+    return Math.max(LOAD_MORE_THRESHOLD_PX, Math.round(containerHeight * 1.5))
+  }, [containerHeight])
+
+  useEffect(() => {
+    if (!isTauri()) return
+    if (!currentLibraryPath) return
+    if (isLoadingPage) return
+    if (!pagination.hasMore) return
+    if (pagination.page !== 1) return
+    if (assets.length === 0) return
+    const token = queryTokenRef.current
+    if (warmPrefetchTokenRef.current === token) return
+    warmPrefetchTokenRef.current = token
+    let cancelled = false
+    let taskId = 0
+
+    const warmPrefetch = () => {
+      if (cancelled) return
+      if (queryTokenRef.current !== token) return
+      if (Math.abs(scrollVelocityRef.current) > ACTIVE_SCROLL_IDLE_PRELOAD_THRESHOLD) {
+        taskId = scheduleIdleTask(warmPrefetch)
+        return
+      }
+      void loadPage(2, 'append', token)
+    }
+
+    taskId = scheduleIdleTask(warmPrefetch)
+    return () => {
+      cancelled = true
+      cancelIdleTask(taskId)
+    }
+  }, [assets.length, currentLibraryPath, isLoadingPage, loadPage, pagination.hasMore, pagination.page])
+
+  useEffect(() => {
+    if (!isTauri()) return
+    if (!pagination.hasMore || isLoadingPage) return
+    if (pendingLoadAheadRef.current <= 0) return
+    pendingLoadAheadRef.current -= 1
+    const token = queryTokenRef.current
+    void loadPage(pagination.page + 1, 'append', token)
+  }, [isLoadingPage, loadPage, pagination.hasMore, pagination.page])
+
+  useEffect(() => {
+    if (!isTauri()) return
+    if (!similarAssetIdSet || similarAssetIdSet.size === 0) return
+    if (isLoadingPage) return
+
+    const loadedIdSet = new Set(assets.map((asset) => asset.id))
+    let hasMissingSimilar = false
+    for (const id of similarAssetIdSet) {
+      if (!loadedIdSet.has(id)) {
+        hasMissingSimilar = true
+        break
+      }
+    }
+
+    if (!hasMissingSimilar) return
+    if (!pagination.hasMore) return
+
+    const token = queryTokenRef.current
+    void loadPage(pagination.page + 1, 'append', token)
+  }, [assets, isLoadingPage, loadPage, pagination.hasMore, pagination.page, similarAssetIdSet])
+
   useEffect(() => {
     if (layoutMode === 'canvas') return
     const el = parentRef.current
     if (!el) return
+    lastScrollTopRef.current = el.scrollTop
+    lastScrollTimeRef.current = performance.now()
+
     const onScroll = () => {
-      if (el.scrollHeight - el.scrollTop - el.clientHeight <= LOAD_MORE_THRESHOLD_PX) {
+      const now = performance.now()
+      const currentTop = el.scrollTop
+      const delta = currentTop - lastScrollTopRef.current
+      const dt = Math.max(1, now - lastScrollTimeRef.current)
+      const velocity = delta / dt
+      scrollVelocityRef.current = velocity
+      lastScrollTopRef.current = currentTop
+      lastScrollTimeRef.current = now
+
+      const remaining = el.scrollHeight - currentTop - el.clientHeight
+      const predictedRemaining = remaining - Math.max(0, velocity) * SCROLL_PREDICT_MS
+      if (predictedRemaining <= dynamicLoadMoreThreshold) {
         loadNextPage()
+      }
+
+      if (velocity > FAST_SCROLL_PX_PER_MS && pagination.hasMore) {
+        pendingLoadAheadRef.current = Math.max(pendingLoadAheadRef.current, MAX_FAST_PREFETCH_PAGES)
       }
     }
     el.addEventListener('scroll', onScroll, { passive: true })
     onScroll()
     return () => el.removeEventListener('scroll', onScroll)
-  }, [layoutMode, loadNextPage, assets.length])
+  }, [assets.length, dynamicLoadMoreThreshold, layoutMode, loadNextPage, pagination.hasMore])
 
   const filteredAssets = useMemo(() => {
     if (!hasClientOnlyFilters) {
@@ -1126,12 +1500,72 @@ export function AssetsPage() {
     const cardHeight = thumbnailSize + 72 // image + label area (name + meta + margins)
     return cardHeight + gap // gap between rows
   }, [thumbnailSize, gap])
+  const estimatedRowHeight = measureRowHeight()
+  const visibleRowCount = useMemo(() => {
+    const safeHeight = containerHeight > 1 ? containerHeight : (parentRef.current?.clientHeight || 900)
+    return Math.max(1, Math.ceil(safeHeight / Math.max(1, estimatedRowHeight)))
+  }, [containerHeight, estimatedRowHeight])
+  const rowOverscan = useMemo(
+    () => Math.max(10, Math.ceil(visibleRowCount * OVERSCAN_RATIO)),
+    [visibleRowCount]
+  )
+  const masonryOverscan = useMemo(
+    () => Math.max(32, Math.ceil(visibleRowCount * columnCount * OVERSCAN_RATIO)),
+    [visibleRowCount, columnCount]
+  )
+  const priorityPreloadCount = useMemo(
+    () => clampNumber(columnCount * (visibleRowCount + 1), MIN_PRIORITY_PRELOAD_COUNT, MAX_PRIORITY_PRELOAD_COUNT),
+    [columnCount, visibleRowCount]
+  )
+
+  useEffect(() => {
+    if (!isTauri()) return
+    if (layoutMode === 'canvas') return
+    if (filteredAssets.length === 0) return
+
+    const token = queryTokenRef.current
+    if (idlePreloadTokenRef.current === token) return
+    idlePreloadTokenRef.current = token
+
+    const preloadLimit = Math.min(filteredAssets.length, priorityPreloadCount * IDLE_PRELOAD_MULTIPLIER)
+    const preloadCandidates = filteredAssets.slice(0, preloadLimit)
+    let cancelled = false
+    let nextIndex = 0
+    let taskId = 0
+
+    const pump = () => {
+      if (cancelled) return
+      if (Math.abs(scrollVelocityRef.current) > ACTIVE_SCROLL_IDLE_PRELOAD_THRESHOLD) {
+        taskId = scheduleIdleTask(pump)
+        return
+      }
+      const upper = Math.min(preloadCandidates.length, nextIndex + IDLE_PRELOAD_BATCH_SIZE)
+      while (nextIndex < upper) {
+        const asset = preloadCandidates[nextIndex]
+        const src = getCardImageSrc(
+          asset,
+          resolvedThumbnailPathCache.get(asset.id) || asset.thumbnail_path || null
+        )
+        if (src) preloadCardImageSrc(src)
+        nextIndex += 1
+      }
+      if (nextIndex < preloadCandidates.length) {
+        taskId = scheduleIdleTask(pump)
+      }
+    }
+
+    taskId = scheduleIdleTask(pump)
+    return () => {
+      cancelled = true
+      cancelIdleTask(taskId)
+    }
+  }, [filteredAssets, layoutMode, priorityPreloadCount])
 
   const rowVirtualizer = useVirtualizer({
     count: rowCount,
     getScrollElement: () => parentRef.current,
     estimateSize: measureRowHeight,
-    overscan: 5,
+    overscan: rowOverscan,
   })
 
   const virtualizedGridWidth = useMemo(() => {
@@ -1157,10 +1591,145 @@ export function AssetsPage() {
     count: filteredAssets.length,
     getScrollElement: () => parentRef.current,
     estimateSize: estimateMasonryItemHeight,
-    overscan: Math.max(12, columnCount * 4),
+    overscan: masonryOverscan,
     gap,
     lanes: columnCount,
   })
+
+  const scheduleBackendPrefetch = useCallback(() => {
+    if (!isTauri()) return
+    if (layoutMode === 'canvas') return
+    if (filteredAssets.length === 0) return
+
+    if (backendPrefetchRafRef.current !== null) {
+      window.cancelAnimationFrame(backendPrefetchRafRef.current)
+    }
+
+    backendPrefetchRafRef.current = window.requestAnimationFrame(() => {
+      backendPrefetchRafRef.current = null
+      const now = performance.now()
+      if (now - backendPrefetchLastRunRef.current < BACKEND_PREFETCH_MIN_INTERVAL_MS) {
+        return
+      }
+      backendPrefetchLastRunRef.current = now
+      const scrollEl = parentRef.current
+      const viewportTop = scrollEl?.scrollTop ?? 0
+      const viewportBottom = viewportTop + (scrollEl?.clientHeight ?? 0)
+
+      const sliceIds = (startIndex: number, endIndex: number) => {
+        const safeStart = Math.max(0, startIndex)
+        const safeEnd = Math.min(filteredAssets.length - 1, endIndex)
+        if (safeEnd < safeStart) return [] as string[]
+        return filteredAssets.slice(safeStart, safeEnd + 1).map(a => a.id)
+      }
+
+      let visibleStart = 0
+      let visibleEnd = -1
+
+      if (layoutMode === 'masonry') {
+        const virtualItems = masonryVirtualizer.getVirtualItems()
+        if (virtualItems.length === 0) return
+        const visibleItems = virtualItems.filter((item) => item.end > viewportTop && item.start < viewportBottom)
+        const sourceItems = visibleItems.length > 0 ? visibleItems : virtualItems
+        visibleStart = sourceItems.reduce((min, item) => Math.min(min, item.index), Number.MAX_SAFE_INTEGER)
+        visibleEnd = sourceItems.reduce((max, item) => Math.max(max, item.index), -1)
+      } else {
+        const virtualRows = rowVirtualizer.getVirtualItems()
+        if (virtualRows.length === 0) return
+        const visibleRows = virtualRows.filter((row) => row.end > viewportTop && row.start < viewportBottom)
+        const sourceRows = visibleRows.length > 0 ? visibleRows : virtualRows
+        const minRow = sourceRows.reduce((min, row) => Math.min(min, row.index), Number.MAX_SAFE_INTEGER)
+        const maxRow = sourceRows.reduce((max, row) => Math.max(max, row.index), -1)
+        visibleStart = minRow * columnCount
+        visibleEnd = Math.min(filteredAssets.length - 1, ((maxRow + 1) * columnCount) - 1)
+      }
+
+      if (visibleEnd < visibleStart) return
+
+      const visibleCount = visibleEnd - visibleStart + 1
+      const leadCount = Math.min(
+        BACKEND_PREFETCH_MAX_LEAD_IDS,
+        Math.max(visibleCount, Math.ceil(visibleCount * BACKEND_PREFETCH_LEAD_MULTIPLIER))
+      )
+      const movingDown = scrollVelocityRef.current >= 0
+      const p0Ids = sliceIds(visibleStart, visibleEnd)
+      const p1Ids = movingDown
+        ? sliceIds(visibleEnd + 1, visibleEnd + leadCount)
+        : sliceIds(visibleStart - leadCount, visibleStart - 1)
+      const p2Ids = movingDown
+        ? sliceIds(visibleStart - leadCount, visibleStart - 1)
+        : sliceIds(visibleEnd + 1, visibleEnd + leadCount)
+
+      const signature = [
+        p0Ids[0] || '',
+        p0Ids[p0Ids.length - 1] || '',
+        p1Ids[0] || '',
+        p1Ids[p1Ids.length - 1] || '',
+        p2Ids[0] || '',
+        p2Ids[p2Ids.length - 1] || '',
+        p0Ids.length,
+        p1Ids.length,
+        p2Ids.length,
+      ].join('|')
+      if (signature === backendPrefetchSignatureRef.current) return
+      backendPrefetchSignatureRef.current = signature
+
+      void safeInvoke('prefetch_assets_window', {
+        request: {
+          task_id: backendPrefetchTaskIdRef.current,
+          replace_existing_task: true,
+          p0_ids: p0Ids,
+          p1_ids: p1Ids,
+          p2_ids: p2Ids,
+        },
+      })
+    })
+  }, [columnCount, filteredAssets, layoutMode, masonryVirtualizer, rowVirtualizer])
+
+  useEffect(() => {
+    if (layoutMode === 'canvas') return
+    const el = parentRef.current
+    if (!el) return
+    const onScroll = () => {
+      scheduleBackendPrefetch()
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    onScroll()
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [layoutMode, pagination.page, scheduleBackendPrefetch])
+
+  useEffect(() => {
+    const el = parentRef.current
+    if (!el) return
+
+    let raf2 = 0
+    const syncLayout = () => {
+      const nextWidth = Math.round(el.clientWidth)
+      const nextHeight = Math.round(el.clientHeight)
+      if (nextWidth > 1) setContainerWidth(nextWidth)
+      if (nextHeight > 1) setContainerHeight(nextHeight)
+      rowVirtualizer.measure()
+      masonryVirtualizer.measure()
+      scheduleBackendPrefetch()
+    }
+
+    const raf1 = window.requestAnimationFrame(() => {
+      syncLayout()
+      raf2 = window.requestAnimationFrame(syncLayout)
+    })
+
+    return () => {
+      window.cancelAnimationFrame(raf1)
+      if (raf2) window.cancelAnimationFrame(raf2)
+    }
+  }, [
+    isLeftSidebarVisible,
+    isRightSidebarVisible,
+    layoutMode,
+    masonryVirtualizer,
+    rowVirtualizer,
+    scheduleBackendPrefetch,
+  ])
 
   // Force virtualizer to recalculate when thumbnail size or column count changes
   useEffect(() => {
@@ -1652,11 +2221,20 @@ export function AssetsPage() {
                   <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
                     {childFolders.map((folder) => {
                       const folderPreviewSrc = getFolderPreviewSrc(folder)
+                      const normalizedFolderPath = normalizeFolderPath(folder.path)
+                      const isDropHighlighted = folderDropHighlightPath === normalizedFolderPath
                       return (
                         <button
                           key={folder.path}
                           onClick={() => handleOpenFolderPreview(folder.path)}
-                          className="group rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-3 text-left hover:border-indigo-400 dark:hover:border-indigo-500/60 hover:shadow-sm transition-all"
+                          onDragOver={(event) => handleFolderCardDragOver(event, folder.path)}
+                          onDragLeave={handleFolderCardDragLeave}
+                          onDrop={(event) => void handleFolderCardDrop(event, folder.path)}
+                          className={`group rounded-xl border px-3 py-3 text-left transition-all ${
+                            isDropHighlighted
+                              ? 'border-indigo-500 ring-2 ring-indigo-400/60 bg-indigo-50/70 dark:bg-indigo-500/10 dark:border-indigo-400'
+                              : 'border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 hover:border-indigo-400 dark:hover:border-indigo-500/60 hover:shadow-sm'
+                          }`}
                           title={folder.path}
                         >
                           <div className="flex items-center justify-between mb-1.5">
@@ -1724,7 +2302,6 @@ export function AssetsPage() {
                     <div
                       key={asset.id}
                       data-index={virtualItem.index}
-                      ref={masonryVirtualizer.measureElement}
                       style={{
                         position: 'absolute',
                         top: 0,
@@ -1738,6 +2315,8 @@ export function AssetsPage() {
                         isSelected={isSelected}
                         layoutMode={layoutMode}
                         workspaces={workspaces}
+                        dragAssetIds={isSelected && selectedAssets.length > 0 ? selectedAssets : [asset.id]}
+                        priority={virtualItem.index < priorityPreloadCount}
                         onSelect={(e: React.MouseEvent) => handleAssetSelect(asset.id, e)}
                         onContextMenu={() => handleAssetContextMenu(asset.id)}
                         onPreview={() => setPreviewAsset(asset, true)}
@@ -1794,6 +2373,8 @@ export function AssetsPage() {
                           isSelected={isSelected}
                           layoutMode={layoutMode}
                           workspaces={workspaces}
+                          dragAssetIds={isSelected && selectedAssets.length > 0 ? selectedAssets : [asset.id]}
+                          priority={assetIndex < priorityPreloadCount}
                           onSelect={(e: React.MouseEvent) => handleAssetSelect(asset.id, e)}
                           onContextMenu={() => handleAssetContextMenu(asset.id)}
                           onPreview={() => setPreviewAsset(asset, true)}

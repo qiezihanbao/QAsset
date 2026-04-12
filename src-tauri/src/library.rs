@@ -1,4 +1,5 @@
 use crate::models::{LibraryConfig, Registry, RegistryEntry};
+use crate::prefetch::PrefetchRuntime;
 use crate::db;
 use rusqlite::Connection;
 use serde_json;
@@ -12,6 +13,7 @@ pub struct AppState {
     pub library_root: std::sync::RwLock<Option<PathBuf>>,
     pub db_path: std::sync::RwLock<Option<PathBuf>>,
     pub watcher_handle: Mutex<Option<RecommendedWatcher>>,
+    pub prefetch_runtime: PrefetchRuntime,
 }
 
 impl AppState {
@@ -20,6 +22,7 @@ impl AppState {
             library_root: std::sync::RwLock::new(None),
             db_path: std::sync::RwLock::new(None),
             watcher_handle: Mutex::new(None),
+            prefetch_runtime: PrefetchRuntime::new(),
         }
     }
 }

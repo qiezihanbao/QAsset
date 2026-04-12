@@ -380,7 +380,7 @@ export function RightSidebar() {
         threshold: 15
       })
       if (Array.isArray(similarIds)) {
-        setSimilarAssetIds([selectedAsset.id, ...similarIds])
+        setSimilarAssetIds(Array.from(new Set([selectedAsset.id, ...similarIds])))
       }
     } catch (err) {
       console.error("Failed to search similar images:", err)

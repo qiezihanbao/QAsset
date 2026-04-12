@@ -3,6 +3,8 @@ use crate::library;
 use tauri::{Emitter, Manager, State};
 use notify::Watcher;
 use image::GenericImageView;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use image_hasher;
 use std::cmp::Ordering;
@@ -27,6 +29,17 @@ fn needs_transcoded_preview(path_or_name: &str) -> bool {
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_default();
     matches!(ext.as_str(), "psd" | "psb" | "clip")
+}
+
+fn psd_decode_enabled_runtime() -> bool {
+    matches!(
+        std::env::var("QUICKASSET_ENABLE_PSD_DECODE").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("on") | Some("ON")
+    )
+}
+
+fn is_psd_stability_skip_error(message: &str) -> bool {
+    message.contains("Skipping PSD/PSB decode for stability")
 }
 
 fn build_fts_query(raw: &str) -> Option<String> {
@@ -129,6 +142,170 @@ fn parse_string_list_json(raw: Option<&str>) -> Vec<String> {
     out
 }
 
+fn normalize_rel_folder(raw: &str) -> String {
+    raw.replace('\\', "/").trim_matches('/').to_string()
+}
+
+fn unique_file_destination(parent: &Path, original_name: &str) -> PathBuf {
+    let input = Path::new(original_name);
+    let stem = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("asset");
+    let ext = input.extension().and_then(|s| s.to_str()).unwrap_or("");
+
+    let mut candidate = parent.join(original_name);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    for i in 2..=9999 {
+        let file_name = if ext.is_empty() {
+            format!("{} ({})", stem, i)
+        } else {
+            format!("{} ({}).{}", stem, i, ext)
+        };
+        candidate = parent.join(file_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    if ext.is_empty() {
+        parent.join(format!("asset-{}", uuid::Uuid::new_v4().simple()))
+    } else {
+        parent.join(format!(
+            "asset-{}.{}",
+            uuid::Uuid::new_v4().simple(),
+            ext
+        ))
+    }
+}
+
+fn unique_dir_destination(parent: &Path, dir_name: &str) -> PathBuf {
+    let base = dir_name.trim();
+    let clean = if base.is_empty() { "folder" } else { base };
+    let mut candidate = parent.join(clean);
+    if !candidate.exists() {
+        return candidate;
+    }
+
+    for i in 2..=9999 {
+        candidate = parent.join(format!("{} ({})", clean, i));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    parent.join(format!("folder-{}", uuid::Uuid::new_v4().simple()))
+}
+
+fn move_file_with_fallback(src: &Path, dst: &Path) -> Result<(), String> {
+    match fs::rename(src, dst) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            if e.kind() != io::ErrorKind::CrossesDevices {
+                return Err(format!(
+                    "Failed to move '{}' -> '{}': {}",
+                    src.display(),
+                    dst.display(),
+                    e
+                ));
+            }
+            fs::copy(src, dst).map_err(|copy_err| {
+                format!(
+                    "Cross-device copy failed '{}' -> '{}': {}",
+                    src.display(),
+                    dst.display(),
+                    copy_err
+                )
+            })?;
+            fs::remove_file(src).map_err(|remove_err| {
+                format!(
+                    "Remove source file after copy failed '{}': {}",
+                    src.display(),
+                    remove_err
+                )
+            })?;
+            Ok(())
+        }
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst)
+        .map_err(|e| format!("Create directory failed '{}': {}", dst.display(), e))?;
+
+    let entries = fs::read_dir(src)
+        .map_err(|e| format!("Read directory failed '{}': {}", src.display(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let src_path = entry.path();
+        let file_name = entry.file_name();
+        if file_name.to_string_lossy().eq_ignore_ascii_case(".quickasset") {
+            continue;
+        }
+        let target = dst.join(&file_name);
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &target)?;
+        } else if file_type.is_file() {
+            fs::copy(&src_path, &target).map_err(|e| {
+                format!(
+                    "Copy file failed '{}' -> '{}': {}",
+                    src_path.display(),
+                    target.display(),
+                    e
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_path_into_library(src_path: &Path, library_root: &Path) -> Result<(), String> {
+    if !src_path.exists() {
+        return Ok(());
+    }
+
+    let src_canonical = src_path.canonicalize().ok();
+    let lib_canonical = library_root.canonicalize().ok();
+    if let (Some(src_abs), Some(lib_abs)) = (src_canonical, lib_canonical) {
+        if src_abs.starts_with(&lib_abs) {
+            // Already inside the library; no-op.
+            return Ok(());
+        }
+    }
+
+    if src_path.is_file() {
+        let file_name = src_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("asset.bin");
+        let target = unique_file_destination(library_root, file_name);
+        fs::copy(src_path, &target).map_err(|e| {
+            format!(
+                "Copy file failed '{}' -> '{}': {}",
+                src_path.display(),
+                target.display(),
+                e
+            )
+        })?;
+        return Ok(());
+    }
+
+    if src_path.is_dir() {
+        let dir_name = src_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("folder");
+        let target_dir = unique_dir_destination(library_root, dir_name);
+        copy_dir_recursive(src_path, &target_dir)?;
+    }
+
+    Ok(())
+}
+
 fn clip_debug_enabled() -> bool {
     matches!(
         std::env::var("QUICKASSET_CLIP_DEBUG").ok().as_deref(),
@@ -151,6 +328,7 @@ pub async fn create_library(
     state: State<'_, crate::library::AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    let _ = state.prefetch_runtime.cancel_all().await;
     let library_root = PathBuf::from(&path);
     library::create_library(&library_root, &name)?;
 
@@ -170,6 +348,7 @@ pub async fn open_library_cmd(
     state: State<'_, crate::library::AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<LibraryConfig, String> {
+    let _ = state.prefetch_runtime.cancel_all().await;
     let library_root = PathBuf::from(&path);
     let config = library::open_library(&library_root)?;
 
@@ -186,6 +365,7 @@ pub async fn open_library_cmd(
 pub async fn close_library(
     state: State<'_, crate::library::AppState>,
 ) -> Result<(), String> {
+    let _ = state.prefetch_runtime.cancel_all().await;
     // Stop watcher by dropping it
     *state.watcher_handle.lock().map_err(|e| e.to_string())? = None;
     *state.library_root.write().map_err(|e| e.to_string())? = None;
@@ -215,6 +395,7 @@ pub async fn relocate_library(
     new_root: String,
     state: State<'_, crate::library::AppState>,
 ) -> Result<(), String> {
+    let _ = state.prefetch_runtime.cancel_all().await;
     let db_path = get_db_path(&state)?;
     let _library_root = get_library_root(&state)?;
     let new_root_path = PathBuf::from(&new_root);
@@ -255,6 +436,242 @@ pub async fn scan_library(
     tokio::task::spawn_blocking(move || {
         crate::scanner::scan_library(&root, &db_path, &app_handle)
     }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn import_external_paths(
+    paths: Vec<String>,
+    state: State<'_, crate::library::AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<u32, String> {
+    let library_root = get_library_root(&state)?;
+    let db_path = get_db_path(&state)?;
+    if paths.is_empty() {
+        return Ok(0);
+    }
+
+    tokio::task::spawn_blocking(move || {
+        let mut imported_entries = 0u32;
+        for raw_path in paths {
+            let src = PathBuf::from(&raw_path);
+            if !src.exists() {
+                continue;
+            }
+            copy_path_into_library(&src, &library_root)?;
+            imported_entries = imported_entries.saturating_add(1);
+        }
+
+        if imported_entries == 0 {
+            return Ok(0);
+        }
+
+        let report = crate::scanner::scan_library(&library_root, &db_path, &app_handle)?;
+        Ok(report.added.saturating_add(report.updated))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn move_assets_to_folder(
+    asset_ids: Vec<String>,
+    target_folder: String,
+    state: State<'_, crate::library::AppState>,
+) -> Result<u32, String> {
+    let db_path = get_db_path(&state)?;
+    let library_root = get_library_root(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        if asset_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let normalized_target = normalize_rel_folder(&target_folder);
+        let target_dir = if normalized_target.is_empty() {
+            library_root.clone()
+        } else {
+            library_root.join(&normalized_target)
+        };
+        fs::create_dir_all(&target_dir).map_err(|e| {
+            format!(
+                "Failed to create target folder '{}': {}",
+                target_dir.display(),
+                e
+            )
+        })?;
+
+        let conn = library::get_db_connection(&db_path)?;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Begin move transaction failed: {}", e))?;
+        let mut moved_count = 0u32;
+        let mut seen = HashSet::new();
+
+        for asset_id in asset_ids {
+            if !seen.insert(asset_id.clone()) {
+                continue;
+            }
+
+            let (current_path, current_relative_path, current_thumbnail_mtime) = match tx.query_row(
+                "SELECT path, relative_path, thumbnail_mtime FROM assets WHERE id = ?1",
+                rusqlite::params![asset_id.clone()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            ) {
+                Ok(row) => row,
+                Err(_) => continue,
+            };
+
+            let src = PathBuf::from(&current_path);
+            if !src.exists() || !src.is_file() {
+                continue;
+            }
+            if src.parent() == Some(target_dir.as_path()) {
+                continue;
+            }
+
+            let file_name = src
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("asset.bin");
+            let target_path = unique_file_destination(&target_dir, file_name);
+
+            move_file_with_fallback(&src, &target_path)?;
+
+            let new_id = target_path.to_string_lossy().to_string();
+            let new_name = target_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(file_name)
+                .to_string();
+            let new_relative = target_path
+                .strip_prefix(&library_root)
+                .unwrap_or(&target_path)
+                .to_string_lossy()
+                .to_string()
+                .replace('\\', "/");
+
+            let mut next_thumbnail_mtime = current_thumbnail_mtime;
+            let old_thumb_path =
+                crate::thumbnails::thumbnail_abs_path(&library_root, &current_relative_path);
+            let new_thumb_path = crate::thumbnails::thumbnail_abs_path(&library_root, &new_relative);
+            if old_thumb_path.exists() {
+                if let Some(parent) = new_thumb_path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| {
+                        format!("Failed to create thumbnail directory '{}': {}", parent.display(), e)
+                    })?;
+                }
+                if move_file_with_fallback(&old_thumb_path, &new_thumb_path).is_err() {
+                    next_thumbnail_mtime = None;
+                }
+            } else if current_thumbnail_mtime.is_some() {
+                next_thumbnail_mtime = None;
+            }
+
+            tx.execute(
+                "UPDATE assets SET id = ?1, path = ?2, name = ?3, relative_path = ?4, thumbnail_mtime = ?5 WHERE id = ?6",
+                rusqlite::params![
+                    new_id,
+                    new_id,
+                    new_name,
+                    new_relative,
+                    next_thumbnail_mtime,
+                    asset_id
+                ],
+            )
+            .map_err(|e| format!("Update moved asset failed: {}", e))?;
+
+            moved_count = moved_count.saturating_add(1);
+        }
+
+        tx.commit()
+            .map_err(|e| format!("Commit move transaction failed: {}", e))?;
+        crate::scanner::rebuild_folders(&conn, &library_root)?;
+
+        Ok(moved_count)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn move_folder_to_folder(
+    source_folder: String,
+    target_parent_folder: Option<String>,
+    state: State<'_, crate::library::AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<String, String> {
+    let db_path = get_db_path(&state)?;
+    let library_root = get_library_root(&state)?;
+
+    tokio::task::spawn_blocking(move || {
+        let source_rel = normalize_rel_folder(&source_folder);
+        if source_rel.is_empty() {
+            return Err("Source folder is required".to_string());
+        }
+        let target_parent_rel = normalize_rel_folder(target_parent_folder.as_deref().unwrap_or(""));
+
+        let source_abs = library_root.join(&source_rel);
+        if !source_abs.exists() || !source_abs.is_dir() {
+            return Err(format!("Source folder does not exist: {}", source_rel));
+        }
+
+        let source_name = source_abs
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| "Invalid source folder name".to_string())?
+            .to_string();
+
+        let expected_target_rel = if target_parent_rel.is_empty() {
+            source_name.clone()
+        } else {
+            format!("{}/{}", target_parent_rel, source_name)
+        };
+        if expected_target_rel == source_rel
+            || expected_target_rel.starts_with(&format!("{}/", source_rel))
+        {
+            return Err("Cannot move a folder into itself or its subfolder".to_string());
+        }
+
+        let target_parent_abs = if target_parent_rel.is_empty() {
+            library_root.clone()
+        } else {
+            library_root.join(&target_parent_rel)
+        };
+        fs::create_dir_all(&target_parent_abs).map_err(|e| {
+            format!(
+                "Failed to create target parent folder '{}': {}",
+                target_parent_abs.display(),
+                e
+            )
+        })?;
+
+        let target_abs = unique_dir_destination(&target_parent_abs, &source_name);
+        fs::rename(&source_abs, &target_abs).map_err(|e| {
+            format!(
+                "Move folder failed '{}' -> '{}': {}",
+                source_abs.display(),
+                target_abs.display(),
+                e
+            )
+        })?;
+
+        let _report = crate::scanner::scan_library(&library_root, &db_path, &app_handle)?;
+        let target_rel = target_abs
+            .strip_prefix(&library_root)
+            .unwrap_or(&target_abs)
+            .to_string_lossy()
+            .to_string()
+            .replace('\\', "/");
+        Ok(target_rel)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -492,6 +909,35 @@ pub async fn query_assets(
 
         Ok(QueryResult { total_count, items })
     }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn prefetch_assets_window(
+    request: PrefetchAssetsWindowRequest,
+    state: State<'_, crate::library::AppState>,
+) -> Result<PrefetchEnqueueResult, String> {
+    let db_path = get_db_path(&state)?;
+    let library_root = get_library_root(&state)?;
+    state
+        .prefetch_runtime
+        .enqueue_window(request, db_path, library_root)
+        .await
+}
+
+#[tauri::command]
+pub async fn cancel_prefetch_task(
+    task_id: String,
+    state: State<'_, crate::library::AppState>,
+) -> Result<PrefetchCancelResult, String> {
+    state.prefetch_runtime.cancel_task(task_id).await
+}
+
+#[tauri::command]
+pub async fn get_prefetch_status(
+    task_id: String,
+    state: State<'_, crate::library::AppState>,
+) -> Result<Option<PrefetchTaskStatus>, String> {
+    Ok(state.prefetch_runtime.get_status(task_id).await)
 }
 
 #[tauri::command]
@@ -763,6 +1209,11 @@ pub async fn ensure_asset_full_preview(
             .and_then(|e| e.to_str())
             .map(|e| e.eq_ignore_ascii_case("clip"))
             .unwrap_or(false);
+        let is_psd = std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("psd") || e.eq_ignore_ascii_case("psb"))
+            .unwrap_or(false);
 
         let abs_path = std::path::Path::new(&path);
         if !abs_path.exists() {
@@ -833,6 +1284,14 @@ pub async fn ensure_asset_full_preview(
             let _ = std::fs::remove_file(&preview_path);
         }
 
+        if is_psd && !psd_decode_enabled_runtime() {
+            let thumb_path = crate::thumbnails::thumbnail_abs_path(&library_root, &relative_path);
+            if thumb_path.exists() {
+                return Ok(Some(thumb_path.to_string_lossy().to_string()));
+            }
+            return Ok(None);
+        }
+
         let img = match crate::scanner::open_image_for_full_preview(abs_path) {
             Ok(img) => img,
             Err(full_err) => match crate::scanner::open_image_for_processing(abs_path) {
@@ -845,12 +1304,16 @@ pub async fn ensure_asset_full_preview(
                     fallback_img
                 }
                 Err(fallback_err) => {
-                    eprintln!(
-                        "Failed to decode full preview for '{}': {}. Fallback failed: {}",
-                        abs_path.display(),
-                        full_err,
-                        fallback_err
-                    );
+                    if !(is_psd_stability_skip_error(&full_err)
+                        && is_psd_stability_skip_error(&fallback_err))
+                    {
+                        eprintln!(
+                            "Failed to decode full preview for '{}': {}. Fallback failed: {}",
+                            abs_path.display(),
+                            full_err,
+                            fallback_err
+                        );
+                    }
                     return Ok(None);
                 }
             },
@@ -2171,40 +2634,133 @@ pub async fn find_similar_images(
     state: State<'_, crate::library::AppState>,
 ) -> Result<Vec<String>, String> {
     let db_path = get_db_path(&state)?;
+    let library_root = get_library_root(&state)?;
 
     tokio::task::spawn_blocking(move || {
         let conn = library::get_db_connection(&db_path)?;
 
-        // Get target hash
-        let target_hash_str: Option<String> = conn.query_row(
-            "SELECT p_hash FROM assets WHERE id = ?1",
+        // Get target metadata and existing hash.
+        let (target_path, target_relative_path, target_asset_type, target_hash_str): (String, String, String, Option<String>) = conn.query_row(
+            "SELECT path, relative_path, asset_type, p_hash FROM assets WHERE id = ?1",
             rusqlite::params![target_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).map_err(|e| format!("Target asset not found: {}", e))?;
 
-        let target_hash_b64 = target_hash_str
-            .ok_or_else(|| "Target asset has no perceptual hash".to_string())?;
+        let mut target_hash = target_hash_str
+            .as_deref()
+            .and_then(|hash| image_hasher::ImageHash::<Vec<u8>>::from_base64(hash).ok());
 
-        let target_hash = image_hasher::ImageHash::<Vec<u8>>::from_base64(&target_hash_b64)
-            .map_err(|e| format!("Failed to decode target hash: {:?}", e))?;
+        // Historical data may contain missing/corrupt p_hash for newly imported files.
+        // Recompute once on demand so similarity search remains symmetric.
+        if target_hash.is_none() && (target_asset_type == "image" || target_asset_type == "video") {
+            let target_abs_path = Path::new(&target_path);
+            if target_abs_path.exists() {
+                let processed = if target_asset_type == "video" {
+                    crate::scanner::process_video(&library_root, &target_relative_path, target_abs_path)
+                } else {
+                    crate::scanner::process_image(&library_root, &target_relative_path, target_abs_path)
+                };
+
+                if let Some(rebuilt_hash_b64) = processed.p_hash {
+                    if let Ok(decoded_hash) = image_hasher::ImageHash::<Vec<u8>>::from_base64(&rebuilt_hash_b64) {
+                        let width = if processed.width > 0 { Some(processed.width) } else { None };
+                        let height = if processed.height > 0 { Some(processed.height) } else { None };
+                        conn.execute(
+                            "UPDATE assets
+                             SET dominant_color = ?1,
+                                 width = ?2,
+                                 height = ?3,
+                                 p_hash = ?4,
+                                 thumbnail_mtime = COALESCE(?5, thumbnail_mtime)
+                             WHERE id = ?6",
+                            rusqlite::params![
+                                processed.dominant_color,
+                                width,
+                                height,
+                                rebuilt_hash_b64,
+                                processed.thumbnail_mtime,
+                                target_id,
+                            ],
+                        ).map_err(|e| format!("Failed to update rebuilt target hash: {}", e))?;
+                        target_hash = Some(decoded_hash);
+                    }
+                }
+            }
+        }
+
+        let target_hash = target_hash
+            .ok_or_else(|| "Target asset has no valid perceptual hash".to_string())?;
 
         let threshold_dist = threshold;
 
-        // Query all assets with non-null p_hash
+        // Query all image/video assets. Candidate hashes may be missing/corrupt in historical data,
+        // so rebuild on demand to keep similarity search symmetric.
         let mut stmt = conn.prepare(
-            "SELECT id, p_hash FROM assets WHERE p_hash IS NOT NULL AND id != ?1"
+            "SELECT id, path, relative_path, asset_type, p_hash
+             FROM assets
+             WHERE id != ?1
+               AND asset_type IN ('image', 'video')"
         ).map_err(|e| format!("Prepare failed: {}", e))?;
 
         let rows = stmt.query_map(rusqlite::params![target_id], |row| {
             let id: String = row.get(0)?;
-            let hash_b64: String = row.get(1)?;
-            Ok((id, hash_b64))
+            let path: String = row.get(1)?;
+            let relative_path: String = row.get(2)?;
+            let asset_type: String = row.get(3)?;
+            let hash_b64: Option<String> = row.get(4)?;
+            Ok((id, path, relative_path, asset_type, hash_b64))
         }).map_err(|e| format!("Query failed: {}", e))?;
 
         let mut similar_ids = Vec::new();
         for row in rows {
-            if let Ok((id, hash_b64)) = row {
-                if let Ok(other_hash) = image_hasher::ImageHash::<Vec<u8>>::from_base64(&hash_b64) {
+            if let Ok((id, path, relative_path, asset_type, hash_b64)) = row {
+                let mut other_hash = hash_b64
+                    .as_deref()
+                    .and_then(|value| {
+                        if value.trim().is_empty() {
+                            None
+                        } else {
+                            image_hasher::ImageHash::<Vec<u8>>::from_base64(value).ok()
+                        }
+                    });
+
+                if other_hash.is_none() {
+                    let candidate_abs_path = Path::new(&path);
+                    if candidate_abs_path.exists() {
+                        let processed = if asset_type == "video" {
+                            crate::scanner::process_video(&library_root, &relative_path, candidate_abs_path)
+                        } else {
+                            crate::scanner::process_image(&library_root, &relative_path, candidate_abs_path)
+                        };
+
+                        if let Some(rebuilt_hash_b64) = processed.p_hash {
+                            if let Ok(decoded_hash) = image_hasher::ImageHash::<Vec<u8>>::from_base64(&rebuilt_hash_b64) {
+                                let width = if processed.width > 0 { Some(processed.width) } else { None };
+                                let height = if processed.height > 0 { Some(processed.height) } else { None };
+                                let _ = conn.execute(
+                                    "UPDATE assets
+                                     SET dominant_color = ?1,
+                                         width = ?2,
+                                         height = ?3,
+                                         p_hash = ?4,
+                                         thumbnail_mtime = COALESCE(?5, thumbnail_mtime)
+                                     WHERE id = ?6",
+                                    rusqlite::params![
+                                        processed.dominant_color,
+                                        width,
+                                        height,
+                                        rebuilt_hash_b64,
+                                        processed.thumbnail_mtime,
+                                        id,
+                                    ],
+                                );
+                                other_hash = Some(decoded_hash);
+                            }
+                        }
+                    }
+                }
+
+                if let Some(other_hash) = other_hash {
                     if target_hash.dist(&other_hash) <= threshold_dist {
                         similar_ids.push(id);
                     }
