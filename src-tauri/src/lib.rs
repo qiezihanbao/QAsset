@@ -5,6 +5,7 @@ mod thumbnails;
 mod scanner;
 mod commands;
 mod web_import;
+mod prefetch;
 
 use library::AppState;
 use tauri::Manager;
@@ -21,7 +22,13 @@ pub fn run() {
             commands::get_recent_libraries,
             commands::relocate_library,
             commands::scan_library,
+            commands::import_external_paths,
+            commands::move_assets_to_folder,
+            commands::move_folder_to_folder,
             commands::query_assets,
+            commands::prefetch_assets_window,
+            commands::cancel_prefetch_task,
+            commands::get_prefetch_status,
             commands::get_asset_detail,
             commands::ensure_asset_thumbnail,
             commands::repair_missing_thumbnails,

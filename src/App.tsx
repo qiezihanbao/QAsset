@@ -51,6 +51,44 @@ interface WebImportProgressEvent {
   message?: string
 }
 
+function normalizeDroppedPath(raw: string): string {
+  let path = raw.trim().replace(/^"+|"+$/g, '')
+  if (/^file:\/\//i.test(path)) {
+    try {
+      const url = new URL(path)
+      path = decodeURIComponent(url.pathname)
+      if (/^\/[a-zA-Z]:/.test(path)) {
+        path = path.slice(1)
+      }
+    } catch {
+      // Keep the original path when URL parsing fails.
+    }
+  }
+  return path
+}
+
+function extractDroppedPaths(payload: unknown): string[] {
+  const collect = (value: unknown): string[] => {
+    if (!Array.isArray(value)) return []
+    const out: string[] = []
+    for (const item of value) {
+      if (typeof item !== 'string') continue
+      const normalized = normalizeDroppedPath(item)
+      if (normalized) out.push(normalized)
+    }
+    return out
+  }
+
+  if (Array.isArray(payload)) {
+    return Array.from(new Set(collect(payload)))
+  }
+  if (payload && typeof payload === 'object') {
+    const maybePaths = (payload as { paths?: unknown }).paths
+    return Array.from(new Set(collect(maybePaths)))
+  }
+  return []
+}
+
 function App() {
   useTheme()
 
@@ -213,26 +251,60 @@ function App() {
     }
 
     let unlistenDrop: (() => void) | undefined;
+    let unlistenDragDrop: (() => void) | undefined;
     let unlistenFs: (() => void) | undefined;
     let unlistenMigrate: (() => void) | undefined;
     let unlistenScan: (() => void) | undefined;
     let unlistenWebImport: (() => void) | undefined;
+    let lastDropSignature = ''
+    let lastDropAt = 0
+
+    const handleDroppedPayload = async (payload: unknown) => {
+      const filePaths = extractDroppedPaths(payload)
+      if (filePaths.length === 0) {
+        console.warn('Drop payload did not include valid paths:', payload)
+        return
+      }
+
+      const signature = filePaths.join('\n')
+      const now = Date.now()
+      if (signature === lastDropSignature && now - lastDropAt < 1500) {
+        return
+      }
+      lastDropSignature = signature
+      lastDropAt = now
+
+      console.log('Files dropped:', filePaths);
+      try {
+        const importedCount = await invoke<number>("import_external_paths", { paths: filePaths });
+        await loadAssets();
+        if (importedCount > 0) {
+          alert(`拖拽导入完成（新增/更新 ${importedCount} 项）`);
+        } else {
+          alert("未导入任何资源：请确认拖入的是本地文件/文件夹，且文件类型受支持。");
+        }
+      } catch (err) {
+        console.error("Drop import failed:", err);
+        alert(`拖拽导入失败: ${String(err)}`);
+      }
+    }
 
     if (hasTauriRuntime()) {
       try {
-        listen<string[]>('tauri://file-drop', async (event) => {
-          const filePaths = event.payload;
-          if (filePaths && filePaths.length > 0) {
-            console.log('Files dropped:', filePaths);
-            try {
-              await invoke("scan_library");
-              await loadAssets();
-              alert("拖拽导入完成！");
-            } catch (err) {
-              console.error("Drop import failed:", err);
-            }
-          }
+        // Tauri v1 legacy drop event
+        listen<unknown>('tauri://file-drop', async (event) => {
+          await handleDroppedPayload(event.payload)
         }).then(u => unlistenDrop = u);
+
+        // Tauri v2 drag-drop event
+        listen<unknown>('tauri://drag-drop', async (event) => {
+          const payload = event.payload as { type?: string; paths?: string[] } | unknown
+          const eventType = typeof payload === 'object' && payload && 'type' in payload
+            ? String((payload as { type?: unknown }).type || '')
+            : 'drop'
+          if (eventType && eventType !== 'drop') return
+          await handleDroppedPayload(payload)
+        }).then(u => unlistenDragDrop = u);
 
         // File System watcher events: backend already updates DB, frontend just refreshes
         listen('fs-event', async () => {
@@ -335,6 +407,7 @@ function App() {
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       if (unlistenDrop) unlistenDrop();
+      if (unlistenDragDrop) unlistenDragDrop();
       if (unlistenFs) unlistenFs();
       if (unlistenMigrate) unlistenMigrate();
       if (unlistenScan) unlistenScan();

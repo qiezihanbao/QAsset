@@ -37,6 +37,43 @@ const loadAssetsFromWindow = async () => {
   await quickWindow.__loadAssets?.()
 }
 
+const QA_DND_ASSET_MIME = "application/x-quickasset-assets"
+const QA_DND_FOLDER_MIME = "application/x-quickasset-folder"
+
+function readDraggedAssetIds(dataTransfer: DataTransfer | null): string[] {
+  if (!dataTransfer) return []
+  const raw = dataTransfer.getData(QA_DND_ASSET_MIME)
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as { assetIds?: unknown }
+    if (!Array.isArray(parsed.assetIds)) return []
+    const unique = new Set<string>()
+    for (const item of parsed.assetIds) {
+      if (typeof item !== "string") continue
+      const trimmed = item.trim()
+      if (!trimmed) continue
+      unique.add(trimmed)
+    }
+    return Array.from(unique)
+  } catch {
+    return []
+  }
+}
+
+function readDraggedFolderPath(dataTransfer: DataTransfer | null): string | null {
+  if (!dataTransfer) return null
+  const raw = dataTransfer.getData(QA_DND_FOLDER_MIME)
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw) as { folderPath?: unknown }
+    if (typeof parsed.folderPath !== "string") return null
+    const trimmed = parsed.folderPath.trim()
+    return trimmed.length > 0 ? trimmed : null
+  } catch {
+    return null
+  }
+}
+
 const themeOptions: Array<{ mode: ThemeMode; label: string; icon: React.ReactNode }> = [
   { mode: "system", label: "跟随系统", icon: <SunMoon className="h-3.5 w-3.5" /> },
   { mode: "light", label: "浅色", icon: <Sun className="h-3.5 w-3.5" /> },
@@ -104,6 +141,8 @@ export function LeftSidebar() {
     trash: true
   })
   const [isRootTreeExpanded, setIsRootTreeExpanded] = useState(false)
+  const [folderDropHighlightPath, setFolderDropHighlightPath] = useState<string | null>(null)
+  const [draggingFolderPath, setDraggingFolderPath] = useState<string | null>(null)
   const { themeMode, setThemeMode } = useTheme()
   const lastNonFolderSelectionRef = useRef<{ view: ViewType; workspaceId: string | null }>({
     view: activeView,
@@ -202,6 +241,53 @@ export function LeftSidebar() {
     })
     window.dispatchEvent(new Event('quickasset:refresh-assets'))
   }, [])
+
+  const moveAssetsToFolder = useCallback(async (assetIds: string[], targetFolderPath: string) => {
+    if (!(window.__TAURI_INTERNALS__ || window.__TAURI__)) return
+    if (assetIds.length === 0) return
+
+    const normalizedTarget = normalizeFolderPath(targetFolderPath)
+    try {
+      await invoke('move_assets_to_folder', {
+        assetIds,
+        targetFolder: normalizedTarget,
+        asset_ids: assetIds,
+        target_folder: normalizedTarget,
+      })
+      await loadAssetsFromWindow()
+      window.dispatchEvent(new Event('quickasset:refresh-assets'))
+    } catch (error) {
+      console.error('Failed to move assets by drag-drop:', error)
+      alert(`移动文件失败: ${String(error)}`)
+    }
+  }, [normalizeFolderPath])
+
+  const moveFolderToParent = useCallback(async (sourceFolderPath: string, targetParentPath: string | null) => {
+    if (!(window.__TAURI_INTERNALS__ || window.__TAURI__)) return
+
+    const normalizedSource = normalizeFolderPath(sourceFolderPath)
+    const normalizedTargetParent = normalizeFolderPath(targetParentPath)
+    if (!normalizedSource) return
+
+    if (normalizedTargetParent === normalizedSource || normalizedTargetParent.startsWith(`${normalizedSource}/`)) {
+      alert("不能把文件夹移动到它自身或子目录中")
+      return
+    }
+
+    try {
+      await invoke('move_folder_to_folder', {
+        sourceFolder: normalizedSource,
+        targetParentFolder: normalizedTargetParent || null,
+        source_folder: normalizedSource,
+        target_parent_folder: normalizedTargetParent || null,
+      })
+      await loadAssetsFromWindow()
+      window.dispatchEvent(new Event('quickasset:refresh-assets'))
+    } catch (error) {
+      console.error('Failed to move folder by drag-drop:', error)
+      alert(`移动文件夹失败: ${String(error)}`)
+    }
+  }, [normalizeFolderPath])
 
   // Load workspaces from backend on mount
   useEffect(() => {
@@ -465,12 +551,41 @@ export function LeftSidebar() {
         return parts.length > 0 ? parts[parts.length - 1] : 'root'
       })()
     const isRootSelected = !currentFolderNormalized && activeView === 'all'
+    const isRootDropHighlighted = folderDropHighlightPath === ''
     const handleRootFolderClick = () => {
       if (isRootSelected) {
         setIsRootTreeExpanded(prev => !prev)
         return
       }
       openRootFolder()
+    }
+    const handleRootDragOver = (event: React.DragEvent<HTMLButtonElement>) => {
+      const draggedAssetIds = readDraggedAssetIds(event.dataTransfer)
+      const draggedFolderPathRaw = readDraggedFolderPath(event.dataTransfer)
+      const draggedFolderPath = draggedFolderPathRaw ? normalizeFolderPath(draggedFolderPathRaw) : null
+      if (draggedAssetIds.length === 0 && !draggedFolderPath) return
+      if (draggedFolderPath && draggedFolderPath === '') return
+      event.preventDefault()
+      event.stopPropagation()
+      event.dataTransfer.dropEffect = 'move'
+      setFolderDropHighlightPath('')
+    }
+    const handleRootDrop = async (event: React.DragEvent<HTMLButtonElement>) => {
+      event.preventDefault()
+      event.stopPropagation()
+      setFolderDropHighlightPath(null)
+
+      const draggedAssetIds = readDraggedAssetIds(event.dataTransfer)
+      if (draggedAssetIds.length > 0) {
+        await moveAssetsToFolder(draggedAssetIds, '')
+        return
+      }
+
+      const draggedFolderPathRaw = readDraggedFolderPath(event.dataTransfer)
+      if (!draggedFolderPathRaw) return
+      const draggedFolderPath = normalizeFolderPath(draggedFolderPathRaw)
+      if (!draggedFolderPath) return
+      await moveFolderToParent(draggedFolderPath, null)
     }
 
     // Recursive component to render tree
@@ -481,6 +596,8 @@ export function LeftSidebar() {
       const normalizedNodePath = normalizeFolderPath(node.path)
       const isSelected = currentFolderNormalized === normalizedNodePath
       const isFolderCardsVisible = folderPreviewVisibility[normalizedNodePath] ?? true
+      const isDropHighlighted = folderDropHighlightPath === normalizedNodePath
+      const isDraggingSelf = draggingFolderPath === normalizedNodePath
 
       const handleFolderClick = (e: React.MouseEvent) => {
         e.stopPropagation()
@@ -511,6 +628,40 @@ export function LeftSidebar() {
         }
       }
 
+      const handleNodeDragOver = (event: React.DragEvent<HTMLButtonElement>) => {
+        const draggedAssetIds = readDraggedAssetIds(event.dataTransfer)
+        const draggedFolderPathRaw = readDraggedFolderPath(event.dataTransfer)
+        const draggedFolderPath = draggedFolderPathRaw ? normalizeFolderPath(draggedFolderPathRaw) : null
+        if (draggedAssetIds.length === 0 && !draggedFolderPath) return
+        if (draggedFolderPath) {
+          if (draggedFolderPath === normalizedNodePath) return
+          if (normalizedNodePath.startsWith(`${draggedFolderPath}/`)) return
+        }
+        event.preventDefault()
+        event.stopPropagation()
+        event.dataTransfer.dropEffect = 'move'
+        setFolderDropHighlightPath(normalizedNodePath)
+      }
+
+      const handleNodeDrop = async (event: React.DragEvent<HTMLButtonElement>) => {
+        event.preventDefault()
+        event.stopPropagation()
+        setFolderDropHighlightPath(null)
+
+        const draggedAssetIds = readDraggedAssetIds(event.dataTransfer)
+        if (draggedAssetIds.length > 0) {
+          await moveAssetsToFolder(draggedAssetIds, normalizedNodePath)
+          return
+        }
+
+        const draggedFolderPathRaw = readDraggedFolderPath(event.dataTransfer)
+        if (!draggedFolderPathRaw) return
+        const draggedFolderPath = normalizeFolderPath(draggedFolderPathRaw)
+        if (!draggedFolderPath || draggedFolderPath === normalizedNodePath) return
+        if (normalizedNodePath.startsWith(`${draggedFolderPath}/`)) return
+        await moveFolderToParent(draggedFolderPath, normalizedNodePath)
+      }
+
       return (
         <div className="w-full">
           <ContextMenu.Root>
@@ -530,11 +681,29 @@ export function LeftSidebar() {
                 </button>
                 <button
                   onClick={handleFolderClick}
+                  draggable
+                  onDragStart={(event) => {
+                    event.stopPropagation()
+                    event.dataTransfer.effectAllowed = 'move'
+                    event.dataTransfer.setData(QA_DND_FOLDER_MIME, JSON.stringify({ folderPath: normalizedNodePath }))
+                    setDraggingFolderPath(normalizedNodePath)
+                  }}
+                  onDragEnd={() => {
+                    setDraggingFolderPath(null)
+                    setFolderDropHighlightPath(null)
+                  }}
+                  onDragOver={handleNodeDragOver}
+                  onDragLeave={() => {
+                    if (folderDropHighlightPath === normalizedNodePath) {
+                      setFolderDropHighlightPath(null)
+                    }
+                  }}
+                  onDrop={(event) => void handleNodeDrop(event)}
                   className={`flex min-w-0 flex-1 items-center justify-between px-1 py-1.5 rounded-md text-[13px] font-medium transition-colors ${
                     isSelected
                       ? "bg-indigo-100 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300"
                       : "text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/40 dark:hover:bg-zinc-800/50 hover:text-zinc-900 dark:hover:text-zinc-50"
-                  }`}
+                  } ${isDropHighlighted ? "ring-2 ring-indigo-400/70 bg-indigo-50 dark:bg-indigo-500/10" : ""} ${isDraggingSelf ? "opacity-60" : ""}`}
                 >
                   <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
                     <Folder className="w-3.5 h-3.5 opacity-70 shrink-0" />
@@ -590,11 +759,18 @@ export function LeftSidebar() {
       <div className="space-y-0.5">
         <button
           onClick={handleRootFolderClick}
+          onDragOver={handleRootDragOver}
+          onDragLeave={() => {
+            if (folderDropHighlightPath === '') {
+              setFolderDropHighlightPath(null)
+            }
+          }}
+          onDrop={(event) => void handleRootDrop(event)}
           className={`w-full flex items-center justify-between px-1 py-1.5 rounded-md text-[13px] font-medium transition-colors ${
             isRootSelected
               ? "bg-indigo-100 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300"
               : "text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/40 dark:hover:bg-zinc-800/50 hover:text-zinc-900 dark:hover:text-zinc-50"
-          }`}
+          } ${isRootDropHighlighted ? "ring-2 ring-indigo-400/70 bg-indigo-50 dark:bg-indigo-500/10" : ""}`}
         >
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
             <Folder className="w-3.5 h-3.5 opacity-70 shrink-0" />

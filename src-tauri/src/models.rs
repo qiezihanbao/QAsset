@@ -66,6 +66,40 @@ pub struct QueryResult {
     pub items: Vec<AssetInfoLite>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PrefetchAssetsWindowRequest {
+    pub task_id: Option<String>,
+    pub replace_existing_task: Option<bool>,
+    pub p0_ids: Vec<String>,
+    pub p1_ids: Vec<String>,
+    pub p2_ids: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PrefetchEnqueueResult {
+    pub task_id: String,
+    pub queued: u32,
+    pub deduped: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PrefetchCancelResult {
+    pub task_id: String,
+    pub cancelled: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PrefetchTaskStatus {
+    pub task_id: String,
+    pub state: String,
+    pub queued: u32,
+    pub processed: u32,
+    pub succeeded: u32,
+    pub skipped: u32,
+    pub failed: u32,
+    pub updated_at: u64,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct LibraryConfig {
     pub name: String,
