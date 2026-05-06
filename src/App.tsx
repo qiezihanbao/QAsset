@@ -6,6 +6,17 @@ import { WindowTitleBar } from "@/components/layout/WindowTitleBar"
 import { AssetsPage } from "@/pages/AssetsPage"
 import { useAssetStore, type LibraryConfig, type RegistryEntry, type ProgressTaskKind } from "@/store/useAssetStore"
 import { useTheme } from "@/hooks/useTheme"
+import {
+  extractImageFileImports,
+  extractImageImportsFromClipboardData,
+  extractImageImportsFromDataTransfer,
+  hasExternalImageTransferHint,
+  hasUrlTransferData,
+  isQuickAssetInternalDrag,
+  readNavigatorClipboardImageImports,
+  runNativeImageImport,
+  type NativeImageImport,
+} from "@/lib/nativeImageImport"
 
 const RightSidebar = lazy(() =>
   import("@/components/layout/RightSidebar").then((m) => ({ default: m.RightSidebar }))
@@ -208,9 +219,94 @@ function App() {
   }, [loadAssets, openLibrary])
 
   useEffect(() => {
+    let lastNativeImportSignature = ''
+    let lastNativeImportAt = 0
+    let lastPathDropAt = 0
+    let pendingFileDropTimer: ReturnType<typeof setTimeout> | null = null
+
+    const isEditableTarget = (target: EventTarget | null) => {
+      const element = target instanceof HTMLElement ? target : null
+      if (!element) return false
+      return Boolean(
+        element.closest('input, textarea, [contenteditable=""], [contenteditable="true"], [role="textbox"]')
+      )
+    }
+
+    const nativeImportSignature = (imports: NativeImageImport[]) => imports
+      .map((item) => item.kind === 'url'
+        ? `url:${item.url}`
+        : `blob:${item.fileName || ''}:${item.contentType || item.blob.type || ''}:${item.blob.size}`
+      )
+      .join('\n')
+
+    const importNativeImages = async (imports: NativeImageImport[], sourceLabel: string) => {
+      const uniqueImports = Array.from(new Map(
+        imports.map((item) => [
+          item.kind === 'url'
+            ? `url:${item.url}`
+            : `blob:${item.fileName || ''}:${item.contentType || item.blob.type || ''}:${item.blob.size}`,
+          item,
+        ])
+      ).values())
+      if (uniqueImports.length === 0) return
+
+      if (!useAssetStore.getState().currentLibrary) {
+        alert("请先打开或创建素材库")
+        return
+      }
+
+      const signature = nativeImportSignature(uniqueImports)
+      const now = Date.now()
+      if (signature === lastNativeImportSignature && now - lastNativeImportAt < 1500) {
+        return
+      }
+      lastNativeImportSignature = signature
+      lastNativeImportAt = now
+
+      let imported = 0
+      const errors: string[] = []
+      for (const item of uniqueImports) {
+        try {
+          await runNativeImageImport(item)
+          imported += 1
+        } catch (error) {
+          console.error(`${sourceLabel} image import failed:`, error)
+          errors.push(String(error))
+        }
+      }
+
+      if (imported > 0) {
+        await loadAssets()
+      }
+
+      if (errors.length > 0) {
+        if (imported > 0) {
+          alert(`${sourceLabel}部分导入完成（新增 ${imported} 张图片，失败 ${errors.length} 项）`)
+        } else {
+          alert(`${sourceLabel}导入失败: ${errors[0]}`)
+        }
+        return
+      }
+
+      if (imported > 0) {
+        alert(`${sourceLabel}导入完成（新增 ${imported} 张图片）`)
+      }
+    }
+
+    const tryNavigatorClipboardFallback = async () => {
+      try {
+        const imports = await readNavigatorClipboardImageImports()
+        if (imports.length > 0) {
+          await importNativeImages(imports, '粘贴')
+        }
+      } catch (error) {
+        console.debug('Navigator clipboard image read failed:', error)
+      }
+    }
+
     const handleKeyDown = (e: KeyboardEvent) => {
       // Allow inputs and textareas to receive normal key events
-      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
+      if (isEditableTarget(e.target)) {
         return;
       }
 
@@ -233,6 +329,59 @@ function App() {
     };
 
     window.addEventListener('keydown', handleKeyDown);
+
+    const handleNativePaste = async (event: ClipboardEvent) => {
+      if (!hasTauriRuntime() || isEditableTarget(event.target)) return
+
+      const imports = await extractImageImportsFromClipboardData(event.clipboardData)
+      if (imports.length === 0) {
+        void tryNavigatorClipboardFallback()
+        return
+      }
+
+      event.preventDefault()
+      await importNativeImages(imports, '粘贴')
+    }
+
+    const handleNativeDragOver = (event: DragEvent) => {
+      if (!hasTauriRuntime() || !hasExternalImageTransferHint(event.dataTransfer)) return
+      event.preventDefault()
+      if (event.dataTransfer && !isQuickAssetInternalDrag(event.dataTransfer)) {
+        event.dataTransfer.dropEffect = 'copy'
+      }
+    }
+
+    const handleNativeDrop = async (event: DragEvent) => {
+      if (!hasTauriRuntime() || isQuickAssetInternalDrag(event.dataTransfer)) return
+
+      const hasUrlData = hasUrlTransferData(event.dataTransfer)
+      const fileImports = extractImageFileImports(event.dataTransfer)
+      if (!hasUrlData && fileImports.length === 0) return
+
+      event.preventDefault()
+      event.stopPropagation()
+
+      if (hasUrlData) {
+        const imports = await extractImageImportsFromDataTransfer(event.dataTransfer)
+        if (imports.length > 0) {
+          await importNativeImages(imports, '拖拽')
+        }
+        return
+      }
+
+      if (pendingFileDropTimer) {
+        clearTimeout(pendingFileDropTimer)
+      }
+      pendingFileDropTimer = setTimeout(() => {
+        pendingFileDropTimer = null
+        if (Date.now() - lastPathDropAt < 1200) return
+        void importNativeImages(fileImports, '拖拽')
+      }, 650)
+    }
+
+    window.addEventListener('paste', handleNativePaste)
+    window.addEventListener('dragover', handleNativeDragOver)
+    window.addEventListener('drop', handleNativeDrop)
 
     // File Drop Handler
     const clearProgressTimer = (kind: ProgressTaskKind) => {
@@ -273,6 +422,7 @@ function App() {
       }
       lastDropSignature = signature
       lastDropAt = now
+      lastPathDropAt = now
 
       console.log('Files dropped:', filePaths);
       try {
@@ -383,7 +533,7 @@ function App() {
           const status: 'running' | 'success' | 'error' =
             phase === 'done' ? 'success' : phase === 'failed' ? 'error' : 'running'
           upsertProgressTask('web_import', {
-            title: '浏览器图片导入',
+            title: '图片导入',
             phase,
             current,
             total,
@@ -406,6 +556,9 @@ function App() {
 
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('paste', handleNativePaste)
+      window.removeEventListener('dragover', handleNativeDragOver)
+      window.removeEventListener('drop', handleNativeDrop)
       if (unlistenDrop) unlistenDrop();
       if (unlistenDragDrop) unlistenDragDrop();
       if (unlistenFs) unlistenFs();
@@ -414,6 +567,9 @@ function App() {
       if (unlistenWebImport) unlistenWebImport();
       if (fsEventTimerRef.current) {
         clearTimeout(fsEventTimerRef.current)
+      }
+      if (pendingFileDropTimer) {
+        clearTimeout(pendingFileDropTimer)
       }
       clearProgressTimer('scan')
       clearProgressTimer('hash_migrate')

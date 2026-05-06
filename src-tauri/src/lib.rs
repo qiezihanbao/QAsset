@@ -23,6 +23,8 @@ pub fn run() {
             commands::relocate_library,
             commands::scan_library,
             commands::import_external_paths,
+            web_import::import_image_url,
+            web_import::import_image_bytes,
             commands::move_assets_to_folder,
             commands::move_folder_to_folder,
             commands::query_assets,

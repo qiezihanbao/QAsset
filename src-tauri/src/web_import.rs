@@ -1,4 +1,5 @@
 use crate::library;
+use base64::{engine::general_purpose, Engine as _};
 use reqwest::blocking::Client;
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
@@ -27,11 +28,11 @@ struct ImportImageRequest {
 }
 
 #[derive(Debug, Serialize)]
-struct ImportImageResponse {
-    ok: bool,
-    asset_path: String,
-    relative_path: String,
-    source_url: Option<String>,
+pub struct ImportImageResponse {
+    pub ok: bool,
+    pub asset_path: String,
+    pub relative_path: String,
+    pub source_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,6 +142,61 @@ pub fn start_web_import_server(app_handle: AppHandle) {
             handle_request(request, &app_handle);
         }
     });
+}
+
+#[tauri::command]
+pub async fn import_image_url(
+    image_url: String,
+    page_url: Option<String>,
+    page_title: Option<String>,
+    app_handle: AppHandle,
+) -> Result<ImportImageResponse, String> {
+    tokio::task::spawn_blocking(move || {
+        import_image_from_web(
+            &app_handle,
+            ImportImageRequest {
+                image_url,
+                page_url,
+                page_title,
+            },
+        )
+        .map_err(|e| e.message)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn import_image_bytes(
+    bytes_base64: String,
+    source_url: Option<String>,
+    page_url: Option<String>,
+    page_title: Option<String>,
+    file_name: Option<String>,
+    content_type: Option<String>,
+    app_handle: AppHandle,
+) -> Result<ImportImageResponse, String> {
+    tokio::task::spawn_blocking(move || {
+        let bytes = general_purpose::STANDARD
+            .decode(bytes_base64.trim())
+            .map_err(|e| format!("Invalid image data: {}", e))?;
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return Err(format!("Image is too large: {} bytes", bytes.len()));
+        }
+
+        import_image_from_bytes(
+            &app_handle,
+            &bytes,
+            source_url.as_deref(),
+            page_url.as_deref(),
+            page_title.as_deref(),
+            file_name.as_deref(),
+            content_type.as_deref(),
+        )
+        .map_err(|e| e.message)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn handle_request(mut request: Request, app_handle: &AppHandle) {
